@@ -2,9 +2,10 @@
 
 A node type is defined by a JSON file. The files in this folder are VL's
 built-in nodes, loaded at startup (a broken file stops the app with an error
-naming it). Your own nodes are imported into a project with
-**File → Import Node…**: VL copies the JSON and the code files it lists into
-the project file. See `examples/robocars/` for importable examples.
+naming it). Your own nodes are imported into a project with **File → Import
+Nodes…** (Ctrl+I, several at once): VL copies the JSON and the code files it
+lists into the project file. See `examples/robocars/` for importable
+examples.
 
 ```json
 {

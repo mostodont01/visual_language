@@ -83,7 +83,7 @@ Rectangle {
 					text: entry.colorValue
 					color: "#687280"
 					font.pixelSize: 10
-					font.family: "monospace"
+					font.family: monoFont
 				}
 
 				MouseArea {
@@ -153,7 +153,7 @@ Rectangle {
 				SectionTitle { text: "IMPORTED NODES" }
 				Item { Layout.fillWidth: true }
 				VButton {
-					text: "Import Node…"
+					text: "Import Nodes…"
 					kind: "primary"
 					onClicked: root.importRequested()
 				}
@@ -217,7 +217,7 @@ Rectangle {
 							text: nodeEntry.modelData.files.join("   ")
 							color: "#687280"
 							font.pixelSize: 10
-							font.family: "monospace"
+							font.family: monoFont
 							elide: Text.ElideRight
 						}
 						Text {

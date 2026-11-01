@@ -6,70 +6,67 @@ install, and the generated project stays in the output folder.
 """
 
 import importlib.util
-import platform
 import shutil
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QUrl, Property, Signal, Slot
+from PySide6.QtCore import QObject, QProcess, QUrl, Property, Signal, Slot
 
 import compiler
 
-# Debian/Ubuntu packages for each missing tool, used in the install hint.
-_PACKAGES = {
-    "cmake": "cmake",
-    "make": "build-essential",
-    "c++": "build-essential",
-    "x86_64-w64-mingw32-g++": "g++-mingw-w64-x86-64",
-    "sdl2": "libsdl2-dev",
-}
+_EXE = ".exe" if sys.platform == "win32" else ""
+# In the packaged VL (PyInstaller), CMake, Ninja and Zig come along in tools/.
+_BUNDLED = Path(sys._MEIPASS) / "tools" if hasattr(sys, "_MEIPASS") else None
 
 
-def _host_target() -> str:
-    machine = platform.machine().lower()
-    if platform.system() == "Linux":
-        return "linux-arm64" if machine in ("aarch64", "arm64") else "linux-x86_64"
-    if platform.system() == "Windows":
-        return "windows-x86_64"
-    return ""
+def _find(name: str, bundled: str) -> str:
+    """A program bundled with VL, on PATH, or installed by pip next to Python."""
+    candidates = [_BUNDLED / bundled / (name + _EXE)] if _BUNDLED else []
+    if found := shutil.which(name):
+        candidates.append(Path(found))
+    candidates.append(Path(sys.executable).parent / (name + _EXE))   # .venv/bin or .venv\Scripts
+    return next((str(c) for c in candidates if c.is_file()), "")
 
 
 def _zig() -> str:
-    """Path of the Zig compiler from the `ziglang` Python package, or ""."""
+    """Zig from the packaged VL, the `ziglang` Python package or PATH, or ""."""
+    if _BUNDLED:
+        return _find("zig", "zig")
     spec = importlib.util.find_spec("ziglang")
-    if spec is None or spec.origin is None:
-        return ""
-    zig = Path(spec.origin).parent / ("zig.exe" if sys.platform == "win32" else "zig")
-    return str(zig) if zig.exists() else ""
+    if spec is not None and spec.origin is not None:
+        zig = Path(spec.origin).parent / ("zig" + _EXE)
+        if zig.exists():
+            return str(zig)
+    return shutil.which("zig") or ""
 
 
-def _has_native_sdl2() -> bool:
+def _has_system_sdl2() -> bool:
     return bool(shutil.which("sdl2-config")) or Path("/usr/include/SDL2/SDL.h").exists()
 
 
-def missing_tools(target: str, gui: bool) -> list[str]:
-    """Tools (keys of _PACKAGES) needed for this target that aren't installed."""
-    missing = []
-    if not shutil.which("cmake"):
-        missing.append("cmake")
-    if not (shutil.which("ninja") or shutil.which("make")):
-        missing.append("make")
+def uses_system_compiler(target: str, gui: bool) -> bool:
+    """Native Linux builds use the system's compiler and SDL2 when they are
+    installed; everything else is built with Zig, which brings its own."""
+    return (target == compiler.host_target() and sys.platform != "win32"
+            and any(shutil.which(c) for c in ("c++", "g++", "clang++"))
+            and (not gui or _has_system_sdl2()))
 
-    native = target == _host_target()
-    if native:
-        if not (shutil.which("c++") or shutil.which("g++") or shutil.which("clang++")):
-            missing.append("c++")
-        if gui and not _has_native_sdl2():
-            missing.append("sdl2")
-    elif target == "linux-arm64":
-        # Zig cross-compiles; SDL2 is built from source with this machine's headers.
-        if not _zig():
-            missing.append("zig")
-        if gui and not (_has_native_sdl2() and shutil.which("wayland-scanner")):
-            missing.append("sdl2")
-    elif target == "windows-x86_64" and not shutil.which("x86_64-w64-mingw32-g++"):
-        missing.append("x86_64-w64-mingw32-g++")
+
+def missing_tools(target: str, gui: bool) -> list[str]:
+    """Tools needed for this target that aren't installed: cmake, ninja, zig."""
+    missing = []
+    if not _find("cmake", "cmake/bin"):
+        missing.append("cmake")
+    if not (_find("ninja", "ninja") or (sys.platform != "win32" and shutil.which("make"))):
+        missing.append("ninja")
+    if not uses_system_compiler(target, gui) and not _zig():
+        missing.append("zig")
     return missing
+
+
+def _command_line(command: list[str]) -> str:
+    """A command as it would be typed, for the log."""
+    return " ".join(f'"{part}"' if " " in part else part for part in command)
 
 
 class Builder(QObject):
@@ -86,7 +83,6 @@ class Builder(QObject):
         self._executable = ""
         self._process: QProcess | None = None
         self._steps: list[list[str]] = []
-        self._environment = QProcessEnvironment.systemEnvironment()
 
     # -- Properties ---------------------------------------------------------
 
@@ -138,31 +134,30 @@ class Builder(QObject):
 
         missing = missing_tools(target, gui)
         if missing:
-            packages = " ".join(sorted({_PACKAGES[m] for m in missing if m in _PACKAGES}))
             self.append("")
             self.append("The C++ project was generated, but it can't be built here yet. Missing: "
                         + ", ".join(missing))
-            if packages:
-                self.append(f"Install them with:  sudo apt install {packages}")
-            if "zig" in missing:
-                self.append(f"Install Zig (the cross-compiler) with:  {sys.executable} -m pip install ziglang")
+            self.append("Install them with:  " + _command_line(
+                [sys.executable, "-m", "pip", "install", "-r", str(Path(__file__).parent / "requirements.txt")]))
+            if target == compiler.host_target() and sys.platform != "win32":
+                self.append("(Or use the system compiler:  sudo apt install build-essential cmake libsdl2-dev)")
             self.append(f"Or build the project in {output_dir} on the target machine with CMake.")
             self._set_status("generated")
             self.finished.emit(False, "Project generated, not built (missing tools)")
             return
 
-        # One build folder per target: CMake can't switch compilers in place.
-        build_dir = output_dir / "build" / target
-        configure = ["cmake", "-S", str(output_dir), "-B", str(build_dir),
+        # One build folder per target and compiler: CMake can't switch compilers in place.
+        system = uses_system_compiler(target, gui)
+        build_dir = output_dir / "build" / (target if system else target + "-zig")
+        cmake, ninja = _find("cmake", "cmake/bin"), _find("ninja", "ninja")
+        configure = [cmake, "-S", str(output_dir), "-B", str(build_dir),
                      f"-DCMAKE_BUILD_TYPE={'Release' if settings['build_type'] == 'release' else 'Debug'}"]
-        if shutil.which("ninja") and not (build_dir / "Makefile").exists():
-            configure += ["-G", "Ninja"]
-        if target in compiler.TOOLCHAIN_FILES and target != _host_target():
+        if ninja and not (build_dir / "Makefile").exists():
+            configure += ["-G", "Ninja", f"-DCMAKE_MAKE_PROGRAM={ninja}"]
+        if not system:
             configure.append(f"-DCMAKE_TOOLCHAIN_FILE={output_dir / compiler.TOOLCHAIN_FILES[target]}")
-        self._steps = [configure, ["cmake", "--build", str(build_dir), "--parallel"]]
-        self._environment = QProcessEnvironment.systemEnvironment()
-        if _zig():
-            self._environment.insert("VL_ZIG", _zig())
+            configure.append(f"-DVL_ZIG={_zig()}")
+        self._steps = [configure, [cmake, "--build", str(build_dir), "--parallel"]]
         self._executable = str(output_dir / compiler.executable_file_name(name, target))
         self._run_next_step()
 
@@ -195,10 +190,9 @@ class Builder(QObject):
 
         command = self._steps.pop(0)
         self.append("")
-        self.append("$ " + " ".join(command))
+        self.append("$ " + _command_line(command))
         process = QProcess(self)
         process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
-        process.setProcessEnvironment(self._environment)
         process.readyReadStandardOutput.connect(lambda: self._read_output(process))
         process.finished.connect(lambda code, exit_status: self._step_finished(process, code, exit_status))
         process.errorOccurred.connect(lambda error: self._step_error(process, error))

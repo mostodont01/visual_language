@@ -187,7 +187,7 @@ Rectangle {
 				color: row.typeColor
 				font.pixelSize: 9
 				opacity: 0.85
-				font.family: "monospace"
+				font.family: monoFont
 			}
 		}
 

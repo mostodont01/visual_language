@@ -12,7 +12,7 @@ ApplicationWindow {
 	minimumWidth: 1000
 	minimumHeight: 650
 	visible: true
-	title: (project.isDirty ? "• " : "") + project.displayName + " — VL"
+	title: (project.isDirty ? "• " : "") + project.displayName + " — Visual Language"
 
 	color: theme.background
 
@@ -59,8 +59,9 @@ ApplicationWindow {
 
 	// -- Imported nodes and colours ---------------------------------------
 
-	// Pick a node JSON to import. With a nodeId, re-imports that node (the
-	// file must define the same id) and starts in the folder it came from.
+	// Pick node JSONs to import (several at once). With a nodeId, re-imports
+	// that node (one file, defining the same id) and starts in the folder it
+	// came from.
 	function importNode(nodeId) {
 		importDialog.reimportId = nodeId
 		var folder = nodeId ? project.importSourceFolder(nodeId) : project.lastImportFolder
@@ -165,6 +166,7 @@ ApplicationWindow {
 	Shortcut { sequence: "Ctrl+Shift+S"; onActivated: saveDialog.open() }
 	Shortcut { sequence: "Ctrl+Q"; onActivated: window.close() }
 	Shortcut { sequence: "Ctrl+B"; onActivated: compilePopup.open() }
+	Shortcut { sequence: "Ctrl+I"; onActivated: window.importNode("") }
 	Shortcut { sequence: "Ctrl+Z"; onActivated: graphModel.undo() }
 	Shortcut { sequences: ["Ctrl+Shift+Z", "Ctrl+Y"]; onActivated: graphModel.redo() }
 
@@ -174,7 +176,7 @@ ApplicationWindow {
 		id: openDialog
 		title: "Open Project"
 		fileMode: FileDialog.OpenFile
-		nameFilters: ["VL projects (*.vl)"]
+		nameFilters: ["Visual Language projects (*.vl)"]
 		onAccepted: window.performAction("openPath", selectedFile.toString())
 		onRejected: window.reopenStartupIfNeeded()
 	}
@@ -184,7 +186,7 @@ ApplicationWindow {
 		title: "Save Project As"
 		fileMode: FileDialog.SaveFile
 		defaultSuffix: "vl"
-		nameFilters: ["VL projects (*.vl)"]
+		nameFilters: ["Visual Language projects (*.vl)"]
 		onAccepted: {
 			if (project.saveAs(selectedFile.toString()))
 				window.runPendingAction()
@@ -217,28 +219,37 @@ ApplicationWindow {
 	FileDialog {
 		id: importDialog
 		property string reimportId: ""
-		title: reimportId ? "Re-import Node" : "Import Node"
-		fileMode: FileDialog.OpenFile
+		title: reimportId ? "Re-import Node" : "Import Nodes"
+		fileMode: reimportId ? FileDialog.OpenFile : FileDialog.OpenFiles
 		nameFilters: ["Node definitions (*.json)"]
 		onAccepted: {
-			var file = selectedFile.toString()
-			var result = project.importNode(file, reimportId !== "", reimportId)
-			if (result === "exists") {
-				replaceNodeDialog.file = file
-				replaceNodeDialog.open()
-			}
+			var files = reimportId ? [selectedFile.toString()] : selectedFiles.map(f => f.toString())
+			replaceNodeDialog.queue = project.importNodes(files, reimportId !== "", reimportId)
+			replaceNodeDialog.next()
 		}
 	}
 
+	// Asks, one at a time, whether to replace the nodes an import found
+	// already imported (queue: [{file, title}]).
 	MessageBox {
 		id: replaceNodeDialog
-		property string file: ""
-		title: "Replace the imported node?"
+		property var queue: []
+		title: "Replace “" + (queue.length ? queue[0].title : "") + "”?"
 		text: "This project already has a node with the same id. Replacing it updates every node of that type on the canvas."
 		buttons: ["Cancel", "Replace"]
+		escapeButton: "Cancel"
+
+		function next() {
+			if (queue.length)
+				open()
+		}
+
 		onClicked: function(button) {
+			var item = queue[0]
+			queue = queue.slice(1)
 			if (button === "Replace")
-				project.importNode(file, true, "")
+				project.importNodes([item.file], true, "")
+			next()
 		}
 	}
 
@@ -460,7 +471,7 @@ ApplicationWindow {
 				}
 
 				Text {
-					text: "VL"
+					text: "Visual Language"
 					color: theme.text
 					font.pixelSize: 15
 					font.weight: Font.DemiBold
@@ -501,7 +512,7 @@ ApplicationWindow {
 						ShortcutMenuItem { text: "Save"; hint: "Ctrl+S"; onTriggered: window.save() }
 						ShortcutMenuItem { text: "Save As…"; hint: "Ctrl+Shift+S"; onTriggered: saveDialog.open() }
 						VMenuSeparator {}
-						ShortcutMenuItem { text: "Import Node…"; onTriggered: window.importNode("") }
+						ShortcutMenuItem { text: "Import Nodes…"; hint: "Ctrl+I"; onTriggered: window.importNode("") }
 						VMenuSeparator {}
 						ShortcutMenuItem { text: "Quit"; hint: "Ctrl+Q"; onTriggered: window.close() }
 					}
@@ -690,7 +701,7 @@ ApplicationWindow {
 									? "  ∙  " + nodeCanvasArea.selectedNodeIds.length + " SELECTED" : "")
 							color: theme.muted
 							font.pixelSize: 10
-							font.family: "monospace"
+							font.family: monoFont
 						}
 					}
 
@@ -804,21 +815,21 @@ ApplicationWindow {
 									text: "✓ NO ISSUES"
 									color: theme.muted
 									font.pixelSize: 10
-									font.family: "monospace"
+									font.family: monoFont
 								}
 								Text {
 									visible: issuesArea.errorCount > 0
 									text: issuesArea.errorCount + " ✕"
 									color: issuesArea.errorColor
 									font.pixelSize: 13
-									font.family: "monospace"
+									font.family: monoFont
 								}
 								Text {
 									visible: issuesArea.warningCount > 0
 									text: issuesArea.warningCount + " ⚠"
 									color: issuesArea.warningColor
 									font.pixelSize: 13
-									font.family: "monospace"
+									font.family: monoFont
 								}
 							}
 						}
@@ -906,7 +917,7 @@ ApplicationWindow {
 							text: nodeCanvasArea.inspectedNode ? nodeCanvasArea.inspectedNode.nodeId : ""
 							color: theme.muted
 							font.pixelSize: 10
-							font.family: "monospace"
+							font.family: monoFont
 						}
 
 						Row {
@@ -939,7 +950,7 @@ ApplicationWindow {
 						Item { Layout.fillHeight: true }
 
 						Text {
-							text: "VL  •  DEVELOPMENT BUILD"
+							text: "VISUAL LANGUAGE  •  DEVELOPMENT BUILD"
 							color: "#687280"
 							font.pixelSize: 9
 							font.letterSpacing: 0.8
@@ -1057,8 +1068,8 @@ ApplicationWindow {
 					}
 
 					Column {
-						Text { text: "VL"; color: theme.text; font.pixelSize: 16; font.weight: Font.DemiBold }
-						Text { text: "Visual Language"; color: theme.muted; font.pixelSize: 11 }
+						Text { text: "Visual Language"; color: theme.text; font.pixelSize: 16; font.weight: Font.DemiBold }
+						Text { text: "VL"; color: theme.muted; font.pixelSize: 11 }
 					}
 
 					Item { Layout.fillWidth: true }

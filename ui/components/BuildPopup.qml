@@ -81,7 +81,7 @@ Popup {
 					text: builder.log
 					color: "#c9cfd8"
 					selectionColor: "#3b6fd4"
-					font.family: "monospace"
+					font.family: monoFont
 					font.pixelSize: 11
 					padding: 10
 					background: null
@@ -102,7 +102,7 @@ Popup {
 				text: builder.executable
 				color: "#929ba8"
 				font.pixelSize: 11
-				font.family: "monospace"
+				font.family: monoFont
 				elide: Text.ElideMiddle
 			}
 			Item {

@@ -14,6 +14,7 @@ runtime/vl/runtime.hpp.
 """
 
 import json
+import platform
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,6 +33,17 @@ TARGETS = [
     ("windows-x86_64", "Windows x86-64 (.exe)"),
 ]
 
+
+def host_target() -> str:
+    """The target VL itself runs on, or "" for systems VL can't build for."""
+    machine = platform.machine().lower()
+    if platform.system() == "Linux":
+        return "linux-arm64" if machine in ("aarch64", "arm64") else "linux-x86_64"
+    if platform.system() == "Windows":
+        return "windows-x86_64"
+    return ""
+
+
 BUILD_TYPES = [
     ("release", "Release (optimized)"),
     ("debug", "Debug (debug symbols, no optimization)"),
@@ -39,7 +51,7 @@ BUILD_TYPES = [
 
 DEFAULT_SETTINGS: dict[str, Any] = {
     "language": LANGUAGES[0][0],
-    "target": TARGETS[0][0],
+    "target": host_target() or TARGETS[0][0],
     "build_type": BUILD_TYPES[0][0],
     "output_dir": "",        # "" = <project folder>/build
     "executable_name": "",   # "" = project name
@@ -245,7 +257,8 @@ def generate_project(
         output_dir.mkdir(parents=True, exist_ok=True)
         for sub in ("runtime", "nodes", "generated", "cmake"):  # "cmake" is from older VL versions
             shutil.rmtree(output_dir / sub, ignore_errors=True)
-        (output_dir / MARKER_FILE).write_text("Written by VL. This folder is regenerated on every compile.\n")
+        (output_dir / MARKER_FILE).write_text("Written by VL. This folder is regenerated on every compile.\n",
+                                              encoding="utf-8")
         shutil.copytree(RUNTIME_DIR, output_dir / "runtime")
 
         for type_id in used_types:
@@ -274,7 +287,7 @@ def generate_project(
             for rel in packages[type_id].files
             if rel.endswith((".cpp", ".cc", ".cxx"))
         )
-        (output_dir / "CMakeLists.txt").write_text(_cmake_lists(name, cpp_files, gui))
+        (output_dir / "CMakeLists.txt").write_text(_cmake_lists(name, cpp_files, gui), encoding="utf-8")
     except OSError as e:
         return GenerateResult(False, [f"Could not write the project to {output_dir}: {e.strerror}"])
 
@@ -378,7 +391,7 @@ target_include_directories({target} PRIVATE ${{CMAKE_SOURCE_DIR}} ${{CMAKE_SOURC
 
 if(VL_GUI)
     include(FetchContent)
-    if(CMAKE_CROSSCOMPILING)
+    if(VL_SDL2_FROM_SOURCE)
         include(runtime/cmake/sdl2-from-source.cmake)
     else()
         find_package(SDL2 REQUIRED)
@@ -396,9 +409,6 @@ if(VL_GUI)
         ${{imgui_SOURCE_DIR}}/backends/imgui_impl_sdlrenderer2.cpp)
     target_include_directories({target} PRIVATE ${{imgui_SOURCE_DIR}} ${{imgui_SOURCE_DIR}}/backends)
     target_compile_definitions({target} PRIVATE VL_GUI)
-    if(TARGET SDL2::SDL2main)
-        target_link_libraries({target} PRIVATE SDL2::SDL2main)
-    endif()
     if(TARGET SDL2::SDL2)
         target_link_libraries({target} PRIVATE SDL2::SDL2)
     else()
@@ -409,6 +419,7 @@ endif()
 
 
 TOOLCHAIN_FILES = {
-    "linux-arm64": "runtime/cmake/aarch64-zig.cmake",
-    "windows-x86_64": "runtime/cmake/mingw-w64-x86_64.cmake",
+    "linux-x86_64": "runtime/cmake/zig-linux-x86_64.cmake",
+    "linux-arm64": "runtime/cmake/zig-linux-arm64.cmake",
+    "windows-x86_64": "runtime/cmake/zig-windows-x86_64.cmake",
 }

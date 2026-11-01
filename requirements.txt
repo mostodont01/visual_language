@@ -1,2 +1,6 @@
 PySide6>=6.8,<7
-ziglang==0.17.0  # cross-compiler for Raspberry Pi / ARM64 builds
+# Build tools for compiling graphs. Zig is the C++ compiler for Windows and
+# Raspberry Pi builds (and Linux without a system compiler).
+ziglang==0.17.0
+cmake>=3.21
+ninja>=1.11

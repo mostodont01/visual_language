@@ -7,6 +7,7 @@
 #include <thread>
 
 #ifdef VL_GUI
+#define SDL_MAIN_HANDLED  // main() is ours (generated/main.cpp), not SDL's.
 #include <SDL.h>
 #include "imgui.h"
 #include "imgui_impl_sdl2.h"
@@ -100,7 +101,11 @@ double App::nextTimer() const {
 
 int App::run() {
     // Show prints from nodes right away, also when piped into a log.
+#ifdef _WIN32
+    std::setvbuf(stdout, nullptr, _IONBF, 0);  // Windows has no line buffering.
+#else
     std::setvbuf(stdout, nullptr, _IOLBF, 0);
+#endif
 
     for (auto& node : nodes_)
         node->setup();
@@ -139,6 +144,7 @@ int App::runHeadless() {
 #ifdef VL_GUI
 
 int App::runGui() {
+    SDL_SetMainReady();
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) != 0) {
         std::fprintf(stderr, "vl: no display (%s), running without widgets\n", SDL_GetError());
         return runHeadless();

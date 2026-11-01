@@ -1,0 +1,61 @@
+# Builds the packaged VL: a Linux AppImage and a Windows installer.
+# Runs when a version tag (v0.1.0, ...) is pushed, which also publishes a
+# GitHub release, or by hand from the Actions tab (files under "Artifacts").
+name: Package
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  linux:
+    # The oldest supported Ubuntu: the AppImage runs on its glibc and newer.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Qt's system libraries
+        run: sudo apt-get update && sudo apt-get install -y libegl1 libxkbcommon-x11-0 libxcb-cursor0
+      - run: pip install -r requirements.txt pyinstaller
+      - run: pyinstaller --noconfirm packaging/vl.spec
+      - run: packaging/build_appimage.sh dist/VL VL-x86_64.AppImage
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VL-linux
+          path: VL-x86_64.AppImage
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt pyinstaller
+      - run: pyinstaller --noconfirm packaging/vl.spec
+      - name: Build the installer (Inno Setup is preinstalled on GitHub's Windows machines)
+        shell: pwsh
+        run: |
+          $version = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}".TrimStart("v") } else { "0.0.0" }
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\iscc.exe" "/DAppVersion=$version" packaging\vl.iss
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VL-windows
+          path: dist/VL-Setup-x86_64.exe
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: [linux, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            VL-linux/VL-x86_64.AppImage
+            VL-windows/VL-Setup-x86_64.exe

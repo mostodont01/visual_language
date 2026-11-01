@@ -1,2 +1,0 @@
-#!/bin/sh
-exec "${VL_ZIG:-zig}" ranlib "$@"

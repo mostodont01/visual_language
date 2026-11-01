@@ -410,55 +410,66 @@ class Project(QObject):
 
     # -- Imported nodes -----------------------------------------------------
 
-    @Slot(str, bool, str, result=str)
-    def importNode(self, location: str, allow_replace: bool, expected_id: str) -> str:
-        """Import a node from its JSON file (plus the code files it lists).
+    @Slot("QVariantList", bool, str, result="QVariantList")
+    def importNodes(self, locations: list, allow_replace: bool, expected_id: str) -> list[dict[str, str]]:
+        """Import nodes from their JSON files (plus the code files they list).
 
-        Returns "ok", "error" (already reported), or "exists" when a node with
-        the same id is already imported and allow_replace is false, so the UI
-        can ask before replacing. expected_id (for re-import) must match the
-        file's id if given.
+        Returns the files whose node id is already imported, as
+        [{"file", "title"}], when allow_replace is false, so the UI can ask
+        before replacing each. expected_id (for re-import) must match the
+        file's id if given. Problems are reported in one message.
         """
-        path = _to_path(location)
-        try:
-            package = load_node_package(path)
-        except CatalogError as e:
-            self.messageRaised.emit("Could not import node", str(e))
-            return "error"
+        added, updated, existing, problems = [], [], [], []
+        for location in locations:
+            path = _to_path(str(location))
+            try:
+                package = load_node_package(path)
+            except CatalogError as e:
+                problems.append(str(e))
+                continue
 
-        node_def = package.definition
-        nid = node_def.type_id
-        if expected_id and nid != expected_id:
-            self.messageRaised.emit(
-                "Could not re-import node",
-                f"{path.name} defines the node '{nid}', not '{expected_id}'.",
-            )
-            return "error"
-        if nid in self._builtin:
-            self.messageRaised.emit(
-                "Could not import node",
-                f"'{nid}' is the id of a built-in node. Give the node a different \"id\" in {path.name}.",
-            )
-            return "error"
-        if nid in self._imported and not allow_replace:
-            return "exists"
+            node_def = package.definition
+            nid = node_def.type_id
+            if expected_id and nid != expected_id:
+                problems.append(f"{path.name} defines the node '{nid}', not '{expected_id}'.")
+                continue
+            if nid in self._builtin:
+                problems.append(f"'{nid}' is the id of a built-in node. "
+                                f"Give the node a different \"id\" in {path.name}.")
+                continue
+            if nid in self._imported and not allow_replace:
+                existing.append({"file": str(location), "title": node_def.title})
+                continue
 
-        replaced = nid in self._imported
-        self._imported = {**self._imported, nid: package}
-        self._import_sources[nid] = str(path.resolve())
-        self._settings.setValue("lastImportFolder", str(path.resolve().parent))
-        self.recentChanged.emit()  # lastImportFolder
+            (updated if nid in self._imported else added).append(node_def.title)
+            self._imported = {**self._imported, nid: package}
+            self._import_sources[nid] = str(path.resolve())
+            self._settings.setValue("lastImportFolder", str(path.resolve().parent))
 
-        warnings = self._apply_catalog()
-        new_groups, new_types = self._fill_missing_colors()
-        self._update_dirty()
+        new_groups, new_types = [], []
+        if added or updated:
+            self.recentChanged.emit()  # lastImportFolder
+            problems += self._apply_catalog()
+            new_groups, new_types = self._fill_missing_colors()
+            self._update_dirty()
+            if len(added) + len(updated) == 1:
+                self.notice.emit(f"{'Updated' if updated else 'Imported'} node “{(added + updated)[0]}”")
+            else:
+                self.notice.emit(", ".join(f"{verb} {len(titles)} node{'s' if len(titles) > 1 else ''}"
+                                           for verb, titles in (("Imported", added), ("updated", updated))
+                                           if titles).capitalize())
 
-        self.notice.emit(f"{'Updated' if replaced else 'Imported'} node “{node_def.title}”")
-        if warnings:
-            self.messageRaised.emit("Node imported with problems", "\n".join(warnings[:20]))
+        if problems:
+            if expected_id:
+                title = "Could not re-import node"
+            elif added or updated:
+                title = "Some nodes were imported with problems"
+            else:
+                title = "Could not import node" if len(problems) == 1 else "Could not import some nodes"
+            self.messageRaised.emit(title, "\n".join(problems[:20]))
         if new_groups or new_types:
             self.colorsSuggested.emit(new_groups, new_types)
-        return "ok"
+        return existing
 
     @Slot(str)
     def removeImportedNode(self, node_id: str):
