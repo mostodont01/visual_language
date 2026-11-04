@@ -4,6 +4,8 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <string>
 #include <thread>
 
 #ifdef VL_GUI
@@ -18,12 +20,24 @@ namespace vl {
 
 namespace {
 
-double secondsNow() {
+double realNow() {
     using namespace std::chrono;
     return duration<double>(steady_clock::now().time_since_epoch()).count();
 }
 
+// Fast mode's simulated clock; negative = real time.
+double fastClock = -1;
+
+bool envFlag(const char* name) {
+    const char* value = std::getenv(name);
+    return value && *value && std::string(value) != "0";
+}
+
 }  // namespace
+
+double now() {
+    return fastClock >= 0 ? fastClock : realNow();
+}
 
 // -- Node ---------------------------------------------------------------------
 
@@ -67,7 +81,7 @@ void App::schedule(Node& node) {
 }
 
 void App::runTimers() {
-    double now = secondsNow();
+    double now = vl::now();
     for (auto& node : nodes_) {
         if (node->vlInterval_ > 0 && now >= node->vlNextRun_) {
             node->vlNextRun_ += node->vlInterval_;
@@ -110,8 +124,14 @@ int App::run() {
     for (auto& node : nodes_)
         node->setup();
 
+    // Fast mode: simulated time, from an arbitrary start (not 0, which nodes
+    // may use for "not yet").
+    const bool fast = envFlag("VL_FAST");
+    if (fast)
+        fastClock = 1000.0;
+
     // Every node gets one chance to run at the start (sources, constants...).
-    double now = secondsNow();
+    double now = vl::now();
     for (auto& node : nodes_) {
         if (node->vlInterval_ > 0)
             node->vlNextRun_ = now + node->vlInterval_;
@@ -119,13 +139,15 @@ int App::run() {
     }
 
 #ifdef VL_GUI
-    if (gui_)
+    if (gui_ && !fast)
         return runGui();
 #endif
     return runHeadless();
 }
 
 int App::runHeadless() {
+    const char* stopAfter = std::getenv("VL_STOP_AFTER");
+    const double stopAt = stopAfter && *stopAfter ? vl::now() + std::atof(stopAfter) : INFINITY;
     for (;;) {
         processQueue();
         runTimers();
@@ -135,7 +157,13 @@ int App::runHeadless() {
         double next = nextTimer();
         if (std::isinf(next))
             return 0;  // Nothing can happen any more.
-        double wait = next - secondsNow();
+        if (next >= stopAt)
+            return 0;
+        if (fastClock >= 0) {
+            fastClock = std::max(fastClock, next);  // Jump straight there.
+            continue;
+        }
+        double wait = next - realNow();
         if (wait > 0)
             std::this_thread::sleep_for(std::chrono::duration<double>(wait));
     }

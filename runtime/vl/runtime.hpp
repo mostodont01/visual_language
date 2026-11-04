@@ -27,6 +27,14 @@ namespace vl {
 class App;
 class Node;
 
+// The program's clock, in seconds (only differences mean anything). Normally
+// real time. In fast mode (environment variable VL_FAST=1, headless only) it
+// is simulated time: instead of waiting for the next timer the program jumps
+// straight to it, so a simulation runs as fast as the computer can and gives
+// the same result every run. Nodes should use this, not their own clock.
+// VL_STOP_AFTER=<seconds> ends a headless run after that long on this clock.
+double now();
+
 // The part of every input the runtime needs to see.
 class InputBase {
 public:
