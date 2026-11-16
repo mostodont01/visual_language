@@ -7,3 +7,4 @@ dist/
 
 # Scratch / example files (not part of the project)
 test.json
+.pytest_cache/
