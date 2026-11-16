@@ -6,6 +6,10 @@ A project file (*.vl) is a zip archive, like Blender's .blend:
     project.json            graph, compile settings, palette, imported node ids
     nodes/<id>/node.json    one folder per imported node: its JSON ...
     nodes/<id>/<code path>  ... and the code files it lists, at the same relative paths
+    history/history.json    commits and branches (see history.py)
+    history/objects/<sha1>  snapshots and file contents the history refers to
+
+project.json and nodes/ are the working state of the current branch.
 
 project.json:
 
@@ -19,7 +23,8 @@ project.json:
         "imported_nodes": {id: {"source": original JSON path}}
     }
 
-Version 1 files (plain JSON, no zip) still open.
+Version 1 files (plain JSON, no zip) and version 2 files (no history) still
+open; they get a "main" branch without commits.
 """
 
 import hashlib
@@ -34,10 +39,11 @@ from PySide6.QtCore import QObject, QSettings, QUrl, Property, Signal, Slot
 import compiler
 from builder import Builder
 from graph_model import GraphModel
+from history import HistoryError, ProjectHistory, describe_summary, summarize
 from node_catalog import CatalogError, NodeDef, NodePackage, load_node_package, node_package_from_files
 
 FILE_FORMAT = "vl-project"
-FILE_VERSION = 2
+FILE_VERSION = 3
 FILE_SUFFIX = ".vl"
 PROJECT_ENTRY = "project.json"
 MAX_RECENT = 5
@@ -79,6 +85,7 @@ class Project(QObject):
     compileSettingsChanged = Signal()
     paletteChanged = Signal()
     importedNodesChanged = Signal()
+    historyChanged = Signal()       # commits, branches or uncommitted changes
     # Something the user should be told about in a dialog: (title, text).
     messageRaised = Signal(str, str)
     # A short message for a toast that fades by itself.
@@ -108,6 +115,9 @@ class Project(QObject):
         self._imported: dict[str, NodePackage] = {}
         self._import_sources: dict[str, str] = {}
         self._dirty = False
+        self._history = ProjectHistory()
+        self._history_branch = ""   # Branch shown in the History tab ("" = the current one)
+        self._uncommitted = False
 
         self._apply_catalog()
         self._fill_missing_colors()
@@ -134,7 +144,7 @@ class Project(QObject):
             nid: [pkg.json_text, {p: hashlib.sha1(b).hexdigest() for p, b in pkg.files.items()}]
             for nid, pkg in self._imported.items()
         }
-        return json.dumps([self._project_dict(), packages], sort_keys=True)
+        return json.dumps([self._project_dict(), packages, self._history.state()], sort_keys=True)
 
     def _mark_saved(self):
         self._saved_key = self._state_key()
@@ -149,6 +159,233 @@ class Project(QObject):
         if dirty != self._dirty:
             self._dirty = dirty
             self.stateChanged.emit()
+        head = self._history.head_snapshot()
+        if head is None:  # Nothing committed yet: only a non-empty project counts.
+            uncommitted = bool(self._graph.nodes or self._imported)
+        else:
+            uncommitted = self._current_snapshot(store=False) != head
+        if uncommitted != self._uncommitted:
+            self._uncommitted = uncommitted
+            self.historyChanged.emit()
+
+    # -- Version history ----------------------------------------------------
+
+    def _current_snapshot(self, store: bool = True) -> str:
+        """Hash of the live project state (stored in the history unless store is False)."""
+        packages = {nid: (pkg.json_text, pkg.files) for nid, pkg in self._imported.items()}
+        return self._history.snapshot(self._project_dict(), packages, store)
+
+    def _load_snapshot(self, key: str | None) -> list[str]:
+        """Make a snapshot the live project state (None: an empty project). Returns warnings."""
+        if key is None:
+            return self._apply_state({}, {})
+        data, plain = self._history.load_snapshot(key)
+        packages, warnings = {}, []
+        for nid, (json_text, files) in plain.items():
+            try:
+                packages[nid] = node_package_from_files(json_text, files, f"imported node '{nid}'")
+            except CatalogError as e:
+                warnings.append(f"Skipped imported node '{nid}': {e}")
+        return warnings + self._apply_state(data, packages)
+
+    def _history_changed(self):
+        self._update_dirty()
+        self.historyChanged.emit()
+        self.stateChanged.emit()  # currentBranch is in the window title
+
+    def _history_error(self, title: str, error: HistoryError) -> bool:
+        self.messageRaised.emit(title, str(error))
+        return False
+
+    def _show_warnings(self, title: str, warnings: list[str]):
+        if warnings:
+            shown = warnings[:20]
+            if len(warnings) > len(shown):
+                shown.append(f"... and {len(warnings) - len(shown)} more.")
+            self.messageRaised.emit(title, "\n".join(shown))
+
+    @Property(str, notify=historyChanged)
+    def currentBranch(self) -> str:
+        return self._history.current
+
+    @Property(bool, notify=historyChanged)
+    def hasUncommittedChanges(self) -> bool:
+        return self._uncommitted
+
+    @Property(bool, notify=historyChanged)
+    def hasCommits(self) -> bool:
+        return bool(self._history.commits)
+
+    @Property("QVariantList", notify=historyChanged)
+    def branches(self) -> list[dict[str, Any]]:
+        result = []
+        for name, info in self._history.branches.items():
+            current = name == self._history.current
+            log = self._history.log(name)
+            result.append({
+                "name": name,
+                "isCurrent": current,
+                "hasDraft": self._uncommitted if current else info["draft"] is not None,
+                "head": info["head"] or "",
+                "message": log[0]["message"] if log else "",
+                "time": log[0]["time"] * 1000 if log else 0,
+                "commitCount": len(log),
+            })
+        return result
+
+    @Property(str, notify=historyChanged)
+    def historyBranch(self) -> str:
+        """The branch the History tab shows."""
+        name = self._history_branch
+        return name if name in self._history.branches else self._history.current
+
+    @Property("QVariantList", notify=historyChanged)
+    def historyLog(self) -> list[dict[str, Any]]:
+        """Commits of the History tab's branch, newest first."""
+        branch = self.historyBranch
+        head = self._history.head(branch)
+        return [
+            {"id": c["id"], "message": c["message"], "time": c["time"] * 1000,
+             "summary": describe_summary(c.get("summary")), "isHead": c["id"] == head}
+            for c in self._history.log(branch)
+        ]
+
+    @Slot(str)
+    def setHistoryBranch(self, name: str):
+        self._history_branch = name
+        self.historyChanged.emit()
+
+    @Slot(result=str)
+    def uncommittedSummary(self) -> str:
+        """What changed since the current branch's last commit, e.g. "+2 nodes, −1 wire"."""
+        if not self._uncommitted:
+            return ""
+        head = self._history.snapshot_project(self._history.head_snapshot())
+        return describe_summary(summarize(head, self._project_dict()))
+
+    # The history actions come in two forms: methods that raise HistoryError
+    # (also used by the MCP server) and slots for QML that show a dialog.
+
+    def commit_changes(self, message: str, show_errors: bool = True) -> str | None:
+        """Commit the live state on the current branch, then save the file if it
+        has one. Returns the save error, if saving failed. Raises HistoryError."""
+        self._history.commit(self._current_snapshot(), message)
+        self._history_changed()
+        self.notice.emit(f"Committed “{message.strip()}” on {self._history.current}")
+        if self._path is not None:
+            return self._write(self._path, show_errors)
+        return None
+
+    def switch_branch(self, name: str) -> list[str]:
+        """Switch branches; the branch left keeps its uncommitted changes as a
+        draft. Returns warnings from loading. Raises HistoryError."""
+        history = self._history
+        if name not in history.branches:
+            raise HistoryError(f"There is no branch “{name}”.")
+        if name == history.current:
+            return []
+        snap = self._current_snapshot()
+        history.set_draft(history.current, None if snap == history.head_snapshot() else snap)
+        target = history.working_snapshot(name)
+        history.current = name
+        history.set_draft(name, None)
+        self._history_branch = ""
+        warnings = self._load_snapshot(target)
+        self._history_changed()
+        self.notice.emit(f"Switched to {name}")
+        return warnings
+
+    def create_branch(self, name: str, from_commit: str = "") -> tuple[str, list[str]]:
+        """Create a branch and switch to it. Returns (its name, warnings).
+
+        From "" (the current state) uncommitted changes move to the new
+        branch and the old one goes back to its last commit, like git. From
+        a commit id the new branch starts at that commit. Raises HistoryError.
+        """
+        history = self._history
+        if from_commit:
+            history.commit_info(from_commit)
+            name = history.create_branch(name, from_commit)
+            warnings = self.switch_branch(name)
+        else:
+            old = history.current
+            name = history.create_branch(name, history.head())
+            if history.head(old) is None:
+                # Nothing committed yet: the old branch keeps a copy.
+                history.set_draft(old, self._current_snapshot())
+            else:
+                history.set_draft(old, None)
+            history.current = name
+            self._history_branch = ""
+            self._history_changed()
+            warnings = []
+        self.notice.emit(f"Created branch {name}")
+        return name, warnings
+
+    @Slot(str, result=bool)
+    def commit(self, message: str) -> bool:
+        """QML asks where to save afterwards when the project has never been saved."""
+        try:
+            return self.commit_changes(message) is None
+        except HistoryError as e:
+            return self._history_error("Could not commit", e)
+
+    @Slot(str, result=bool)
+    def switchBranch(self, name: str) -> bool:
+        try:
+            warnings = self.switch_branch(name)
+        except HistoryError as e:
+            return self._history_error("Could not switch branch", e)
+        self._show_warnings("Switched branch with problems", warnings)
+        return True
+
+    @Slot(str, str, result=bool)
+    def createBranch(self, name: str, from_commit: str) -> bool:
+        try:
+            _, warnings = self.create_branch(name, from_commit)
+        except HistoryError as e:
+            return self._history_error("Could not create branch", e)
+        self._show_warnings("Created branch with problems", warnings)
+        return True
+
+    @Slot(str, str, result=bool)
+    def renameBranch(self, old: str, new: str) -> bool:
+        try:
+            new = self._history.rename_branch(old, new)
+        except HistoryError as e:
+            return self._history_error("Could not rename branch", e)
+        if self._history_branch == old:
+            self._history_branch = new
+        self._history_changed()
+        return True
+
+    @Slot(str, result=bool)
+    def deleteBranch(self, name: str) -> bool:
+        try:
+            self._history.delete_branch(name)
+        except HistoryError as e:
+            return self._history_error("Could not delete branch", e)
+        self._history_changed()
+        self.notice.emit(f"Deleted branch {name}")
+        return True
+
+    @Slot(str, result=bool)
+    def restoreCommit(self, commit_id: str) -> bool:
+        """Replace the current branch's working state with a commit. The branch
+        doesn't move, so the difference shows up as uncommitted changes."""
+        try:
+            info = self._history.commit_info(commit_id)
+            warnings = self._load_snapshot(info["snapshot"])
+        except HistoryError as e:
+            return self._history_error("Could not restore commit", e)
+        self._history_changed()
+        self.notice.emit(f"Restored “{info['message']}”")
+        self._show_warnings("Restored with problems", warnings)
+        return True
+
+    @property
+    def history(self) -> ProjectHistory:
+        return self._history
 
     # -- Properties ---------------------------------------------------------
 
@@ -234,15 +471,12 @@ class Project(QObject):
 
     @Slot()
     def newProject(self):
-        self._imported = {}
-        self._import_sources = {}
-        self._apply_catalog()
-        self._graph.clear()
-        self._set_compile_settings(dict(compiler.DEFAULT_SETTINGS))
-        self._set_palette(load_palette(self._default_palette))
-        self._fill_missing_colors()
+        self._history = ProjectHistory()
+        self._history_branch = ""
+        self._apply_state({}, {})
         self._set_path(None)
         self._mark_saved()
+        self._history_changed()
 
     @Slot(str, result=bool)
     def openProject(self, location: str) -> bool:
@@ -252,7 +486,7 @@ class Project(QObject):
             return False
 
         try:
-            data, packages, warnings = self._read_file(path)
+            data, packages, history, warnings = self._read_file(path)
         except OSError as e:
             self.messageRaised.emit("Could not open project", f"{path}\n\n{e.strerror}")
             return False
@@ -260,28 +494,14 @@ class Project(QObject):
             self.messageRaised.emit("Could not open project", f"{path.name}: {e}")
             return False
 
-        self._imported = packages
-        self._import_sources = {
-            nid: str(info.get("source", ""))
-            for nid, info in (data.get("imported_nodes") or {}).items()
-            if nid in packages and isinstance(info, dict)
-        }
-        warnings += self._apply_catalog()
-        warnings += self._graph.load_dict(data)
-        self._set_compile_settings(compiler.load_settings(data.get("compile")))
-        # Version 1 files have no palette: start from the defaults.
-        self._set_palette(load_palette(data["palette"]) if "palette" in data
-                          else load_palette(self._default_palette))
-        self._fill_missing_colors()
+        self._history = history
+        self._history_branch = ""
+        warnings += self._apply_state(data, packages)
         self._set_path(path)
         self._mark_saved()
+        self._history_changed()
         self._add_recent(path)
-
-        if warnings:
-            shown = warnings[:20]
-            if len(warnings) > len(shown):
-                shown.append(f"... and {len(warnings) - len(shown)} more.")
-            self.messageRaised.emit("Project opened with problems", "\n".join(shown))
+        self._show_warnings("Project opened with problems", warnings)
         return True
 
     @Slot(result=bool)
@@ -289,18 +509,35 @@ class Project(QObject):
         """Save to the current file. Returns False if there is none (use saveAs)."""
         if self._path is None:
             return False
-        return self._write(self._path)
+        return self._write(self._path) is None
 
     @Slot(str, result=bool)
     def saveAs(self, location: str) -> bool:
+        return self.save_to(location) is None
+
+    def save_to(self, location: str, show_errors: bool = True) -> str | None:
+        """Save as the given file (".vl" is added if missing). Returns an error message, or None."""
         path = _to_path(location)
         if path.suffix != FILE_SUFFIX:
             path = path.with_name(path.name + FILE_SUFFIX)
-        if not self._write(path):
-            return False
+        error = self._write(path, show_errors)
+        if error:
+            return error
         self._set_path(path)
         self._add_recent(path)
-        return True
+        return None
+
+    @property
+    def path(self) -> Path | None:
+        return self._path
+
+    @property
+    def builtin_ids(self) -> set[str]:
+        return set(self._builtin)
+
+    @property
+    def imported_ids(self) -> set[str]:
+        return set(self._imported)
 
     # -- Compile ------------------------------------------------------------
 
@@ -419,9 +656,32 @@ class Project(QObject):
         before replacing each. expected_id (for re-import) must match the
         file's id if given. Problems are reported in one message.
         """
+        result = self.import_node_files([str(loc) for loc in locations], allow_replace, expected_id)
+        added, updated, problems = result["added"], result["updated"], result["problems"]
+        if problems:
+            if expected_id:
+                title = "Could not re-import node"
+            elif added or updated:
+                title = "Some nodes were imported with problems"
+            else:
+                title = "Could not import node" if len(problems) == 1 else "Could not import some nodes"
+            self.messageRaised.emit(title, "\n".join(problems[:20]))
+        if result["new_groups"] or result["new_types"]:
+            self.colorsSuggested.emit(result["new_groups"], result["new_types"])
+        return result["existing"]
+
+    def import_node_files(self, locations: list[str], allow_replace: bool,
+                          expected_id: str = "") -> dict[str, list]:
+        """importNodes() without dialogs (also used by the MCP server).
+
+        Returns {"added", "updated": [title], "existing": [{"file", "title"}],
+        "problems": [str], "new_groups", "new_types": [name]}. New groups
+        and types get suggested colours. Shows a toast when something was
+        imported.
+        """
         added, updated, existing, problems = [], [], [], []
         for location in locations:
-            path = _to_path(str(location))
+            path = _to_path(location)
             try:
                 package = load_node_package(path)
             except CatalogError as e:
@@ -438,7 +698,7 @@ class Project(QObject):
                                 f"Give the node a different \"id\" in {path.name}.")
                 continue
             if nid in self._imported and not allow_replace:
-                existing.append({"file": str(location), "title": node_def.title})
+                existing.append({"file": location, "title": node_def.title})
                 continue
 
             (updated if nid in self._imported else added).append(node_def.title)
@@ -459,17 +719,8 @@ class Project(QObject):
                                            for verb, titles in (("Imported", added), ("updated", updated))
                                            if titles).capitalize())
 
-        if problems:
-            if expected_id:
-                title = "Could not re-import node"
-            elif added or updated:
-                title = "Some nodes were imported with problems"
-            else:
-                title = "Could not import node" if len(problems) == 1 else "Could not import some nodes"
-            self.messageRaised.emit(title, "\n".join(problems[:20]))
-        if new_groups or new_types:
-            self.colorsSuggested.emit(new_groups, new_types)
-        return existing
+        return {"added": added, "updated": updated, "existing": existing, "problems": problems,
+                "new_groups": new_groups, "new_types": new_types}
 
     @Slot(str)
     def removeImportedNode(self, node_id: str):
@@ -491,6 +742,24 @@ class Project(QObject):
 
     # -- Internals ----------------------------------------------------------
 
+    def _apply_state(self, data: dict, packages: dict[str, NodePackage]) -> list[str]:
+        """Make loaded project data (project.json content) the live state. Returns warnings.
+        Resets the undo history, like opening a file."""
+        self._imported = packages
+        self._import_sources = {
+            nid: str(info.get("source", ""))
+            for nid, info in (data.get("imported_nodes") or {}).items()
+            if nid in packages and isinstance(info, dict)
+        }
+        warnings = self._apply_catalog()
+        warnings += self._graph.load_dict(data)
+        self._set_compile_settings(compiler.load_settings(data.get("compile")))
+        # Version 1 files have no palette: start from the defaults.
+        self._set_palette(load_palette(data["palette"]) if "palette" in data
+                          else load_palette(self._default_palette))
+        self._fill_missing_colors()
+        return warnings
+
     def _apply_catalog(self) -> list[str]:
         """Give the graph the built-in nodes plus this project's imported ones."""
         catalog = dict(self._builtin)
@@ -499,10 +768,11 @@ class Project(QObject):
         self.importedNodesChanged.emit()
         return warnings
 
-    def _read_file(self, path: Path) -> tuple[dict, dict[str, NodePackage], list[str]]:
+    def _read_file(self, path: Path) -> tuple[dict, dict[str, NodePackage], ProjectHistory, list[str]]:
         """Read a project file. Raises OSError, or ValueError for bad content."""
         packages: dict[str, NodePackage] = {}
         warnings: list[str] = []
+        history = ProjectHistory()
 
         if zipfile.is_zipfile(path):
             with zipfile.ZipFile(path) as archive:
@@ -531,6 +801,7 @@ class Project(QObject):
                         warnings.append(f"Skipped imported node '{nid}': its id doesn't match or clashes.")
                         continue
                     packages[nid] = package
+                history = ProjectHistory.read(archive)
         else:
             # Version 1: plain JSON.
             try:
@@ -539,7 +810,7 @@ class Project(QObject):
                 raise ValueError(f"not valid JSON: {e}") from None
             self._check_header(data)
 
-        return data, packages, warnings
+        return data, packages, history, warnings
 
     @staticmethod
     def _check_header(data: Any):
@@ -548,7 +819,8 @@ class Project(QObject):
         if data.get("version", 0) > FILE_VERSION:
             raise ValueError(f"saved by a newer version of VL (file version {data['version']}).")
 
-    def _write(self, path: Path) -> bool:
+    def _write(self, path: Path, show_errors: bool = True) -> str | None:
+        """Write the project file. Returns an error message, or None on success."""
         # Write to a temporary file first, so a failed save never leaves a
         # half-written project behind.
         tmp = path.with_name(path.name + ".tmp")
@@ -559,13 +831,15 @@ class Project(QObject):
                     archive.writestr(f"nodes/{nid}/node.json", pkg.json_text)
                     for rel, content in pkg.files.items():
                         archive.writestr(f"nodes/{nid}/{rel}", content)
+                self._history.write(archive)
             os.replace(tmp, path)
         except OSError as e:
             tmp.unlink(missing_ok=True)
-            self.messageRaised.emit("Could not save project", f"{path}\n\n{e.strerror}")
-            return False
+            if show_errors:
+                self.messageRaised.emit("Could not save project", f"{path}\n\n{e.strerror}")
+            return f"Could not save {path}: {e.strerror}"
         self._mark_saved()
-        return True
+        return None
 
     def _set_compile_settings(self, settings: dict[str, Any]):
         self._compile_settings = settings

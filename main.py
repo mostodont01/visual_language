@@ -9,8 +9,10 @@ from PySide6.QtQuickControls2 import QQuickStyle
 
 from builder import Builder
 from graph_model import GraphModel
+from mcp_server import McpServer
 from node_catalog import CatalogError, load_node_definitions
 from project import Project
+from vl_tools import VlTools
 
 # The packaged VL (PyInstaller) unpacks its files into sys._MEIPASS.
 APP_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
@@ -48,9 +50,19 @@ def main() -> int:
     project = Project(graph_model, builtin_nodes, APP_DIR / "nodes", default_palette, builder)
 
     engine = QQmlApplicationEngine()
+    # MCP server for Claude: off unless enabled in Settings (or --mcp for this run).
+    tools = VlTools(graph_model, project, builder,
+                    lambda: engine.rootObjects()[0] if engine.rootObjects() else None)
+    mcp_server = McpServer(tools, "0.1")
+    mcp_server.clientConnected.connect(lambda name: project.notice.emit(f"{name} connected"))
+    if "--mcp" in sys.argv[1:]:
+        mcp_server.enable_for_session()
+
     engine.rootContext().setContextProperty("graphModel", graph_model)
     engine.rootContext().setContextProperty("project", project)
     engine.rootContext().setContextProperty("builder", builder)
+    engine.rootContext().setContextProperty("mcpServer", mcp_server)
+    engine.rootContext().setContextProperty("mcpTools", tools)
     # "monospace" only exists on Linux; ask the system for its fixed-width font.
     engine.rootContext().setContextProperty(
         "monoFont", QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont).family())

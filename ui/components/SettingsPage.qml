@@ -251,6 +251,79 @@ Rectangle {
 				}
 			}
 
+			// -- Claude (MCP server). An app setting, not part of the project.
+			Item { Layout.preferredHeight: 6 }
+			SectionTitle { text: "CLAUDE (MCP SERVER)" }
+			Hint {
+				Layout.fillWidth: true
+				text: "Lets Claude Code (or another MCP client on this computer) read and edit the open graph, import nodes and build. "
+					+ "Its edits show up live and undo with Ctrl+Z. This is a VL setting, not saved with the project."
+			}
+
+			RowLayout {
+				spacing: 12
+				VCheckBox {
+					text: "Allow MCP connections"
+					checked: mcpServer.enabled
+					onToggled: mcpServer.setEnabled(checked)
+				}
+				Text {
+					text: "Port"
+					color: "#929ba8"
+					font.pixelSize: 12
+				}
+				VTextField {
+					id: portField
+					Layout.preferredWidth: 70
+					text: mcpServer.port
+					validator: IntValidator { bottom: 1024; top: 65535 }
+					onEditingFinished: mcpServer.setPort(parseInt(text))
+					Connections {
+						target: mcpServer
+						function onStateChanged() { portField.text = mcpServer.port }
+					}
+				}
+				Text {
+					text: mcpServer.error !== "" ? mcpServer.error
+						: !mcpServer.listening ? "Off"
+						: mcpServer.clientName !== "" ? "Listening · " + mcpServer.clientName + " connected"
+						: "Listening on " + mcpServer.url
+					color: mcpServer.error !== "" ? "#f87171" : mcpServer.listening ? "#4ade80" : "#687280"
+					font.pixelSize: 11
+				}
+			}
+
+			RowLayout {
+				Layout.fillWidth: true
+				spacing: 8
+				Rectangle {
+					Layout.fillWidth: true
+					implicitHeight: 30
+					radius: 5
+					color: "#1d2025"
+					border.color: "#383d46"
+					Text {
+						anchors.fill: parent
+						anchors.leftMargin: 10
+						anchors.rightMargin: 10
+						verticalAlignment: Text.AlignVCenter
+						text: mcpServer.addCommand
+						color: "#c3cad4"
+						font.pixelSize: 11
+						font.family: monoFont
+						elide: Text.ElideRight
+					}
+				}
+				VButton {
+					text: "Copy"
+					onClicked: mcpServer.copyAddCommand()
+				}
+			}
+			Hint {
+				Layout.fillWidth: true
+				text: "Run this command once in a terminal to connect Claude Code, then reconnect it with /mcp (or restart it)."
+			}
+
 			Item { Layout.preferredHeight: 32 }
 		}
 	}

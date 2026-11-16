@@ -12,7 +12,7 @@ ApplicationWindow {
 	minimumWidth: 1000
 	minimumHeight: 650
 	visible: true
-	title: (project.isDirty ? "• " : "") + project.displayName + " — Visual Language"
+	title: (project.isDirty ? "• " : "") + project.displayName + " [" + project.currentBranch + "] — Visual Language"
 
 	color: theme.background
 
@@ -54,8 +54,63 @@ ApplicationWindow {
 	// fails, the popup comes back instead of leaving a blank project.
 	property bool returnToStartup: false
 
-	// 0 = Graph, 1 = Settings
+	// 0 = Graph, 1 = History, 2 = Settings
 	property int currentTab: 0
+
+	// -- Version history --------------------------------------------------
+
+	function openCommit() {
+		if (project.hasUncommittedChanges)
+			commitPopup.open()
+		else
+			project.notice("Nothing to commit: no changes since the last commit")
+	}
+
+	// fromCommit "" branches off the current state; label describes a commit.
+	function newBranch(fromCommit, label) {
+		branchNamePopup.mode = "new"
+		branchNamePopup.fromCommit = fromCommit
+		branchNamePopup.oldName = ""
+		branchNamePopup.title = "New branch"
+		branchNamePopup.text = fromCommit
+			? "Starts at the commit “" + label + "” and switches to it. Uncommitted changes on "
+				+ project.currentBranch + " stay there."
+			: "Starts from the current state of " + project.currentBranch + " and switches to it."
+				+ (project.hasUncommittedChanges && project.hasCommits
+					? " The uncommitted changes move to the new branch; " + project.currentBranch
+						+ " goes back to its last commit." : "")
+		branchNamePopup.initialName = ""
+		branchNamePopup.acceptText = "Create Branch"
+		branchNamePopup.open()
+	}
+
+	function renameBranch(name) {
+		branchNamePopup.mode = "rename"
+		branchNamePopup.oldName = name
+		branchNamePopup.title = "Rename branch “" + name + "”"
+		branchNamePopup.text = ""
+		branchNamePopup.initialName = name
+		branchNamePopup.acceptText = "Rename"
+		branchNamePopup.open()
+	}
+
+	function deleteBranch(name, commitCount) {
+		deleteBranchDialog.branch = name
+		deleteBranchDialog.title = "Delete branch “" + name + "”?"
+		deleteBranchDialog.text = "Its commits and uncommitted changes are deleted too, "
+			+ "except commits other branches also have. This can't be undone after saving."
+		deleteBranchDialog.open()
+	}
+
+	function restoreCommit(commitId, message) {
+		if (!project.hasUncommittedChanges) {
+			project.restoreCommit(commitId)
+			return
+		}
+		restoreDialog.commitId = commitId
+		restoreDialog.title = "Restore “" + message + "”?"
+		restoreDialog.open()
+	}
 
 	// -- Imported nodes and colours ---------------------------------------
 
@@ -167,6 +222,7 @@ ApplicationWindow {
 	Shortcut { sequence: "Ctrl+Q"; onActivated: window.close() }
 	Shortcut { sequence: "Ctrl+B"; onActivated: compilePopup.open() }
 	Shortcut { sequence: "Ctrl+I"; onActivated: window.importNode("") }
+	Shortcut { sequence: "Ctrl+K"; onActivated: window.openCommit() }
 	Shortcut { sequence: "Ctrl+Z"; onActivated: graphModel.undo() }
 	Shortcut { sequences: ["Ctrl+Shift+Z", "Ctrl+Y"]; onActivated: graphModel.redo() }
 
@@ -260,6 +316,55 @@ ApplicationWindow {
 		onClicked: function(button) {
 			if (button === "Remove")
 				project.removeImportedNode(nodeId)
+		}
+	}
+
+	CommitPopup {
+		id: commitPopup
+		onCommitRequested: function(message) {
+			// A commit is saved with the project; ask where if it has no file yet.
+			if (project.commit(message) && !project.hasFilePath)
+				saveDialog.open()
+		}
+	}
+
+	NamePopup {
+		id: branchNamePopup
+		property string mode: "new"
+		property string fromCommit: ""
+		property string oldName: ""
+		onAccepted: function(name) {
+			if (mode === "new") {
+				if (project.createBranch(name, fromCommit))
+					nodeCanvasArea.frameAll()
+			} else {
+				project.renameBranch(oldName, name)
+			}
+		}
+	}
+
+	MessageBox {
+		id: deleteBranchDialog
+		property string branch: ""
+		buttons: ["Cancel", "Delete"]
+		defaultButton: "Cancel"
+		onClicked: function(button) {
+			if (button === "Delete")
+				project.deleteBranch(branch)
+		}
+	}
+
+	MessageBox {
+		id: restoreDialog
+		property string commitId: ""
+		text: "This replaces the uncommitted changes on " + project.currentBranch
+			+ ". Commit them first, or create a branch, to keep them."
+		buttons: ["Cancel", "Restore"]
+		onClicked: function(button) {
+			if (button === "Restore") {
+				project.restoreCommit(commitId)
+				nodeCanvasArea.frameAll()
+			}
 		}
 	}
 
@@ -435,6 +540,17 @@ ApplicationWindow {
 		function onDiagnosticsMessage(text) { toast.show(text) }
 	}
 
+	// Requests from the MCP tools (Claude) that only the UI can carry out.
+	Connections {
+		target: mcpTools
+		function onViewRequested(action) {
+			if (action === "frame")
+				nodeCanvasArea.frameAll()
+			else if (action === "showBuildLog")
+				buildPopup.open()
+		}
+	}
+
 	// -- Layout -----------------------------------------------------------
 
 	ColumnLayout {
@@ -577,7 +693,7 @@ ApplicationWindow {
 				Item { Layout.preferredWidth: 10 }
 
 				Repeater {
-					model: ["Graph", "Settings"]
+					model: ["Graph", "History", "Settings"]
 
 					delegate: Item {
 						id: tab
@@ -626,6 +742,57 @@ ApplicationWindow {
 				}
 
 				Item { Layout.fillWidth: true }
+
+				// Current branch: click for the branch menu.
+				VButton {
+					id: branchButton
+					subtle: true
+					text: "⎇ " + project.currentBranch + (project.hasUncommittedChanges ? "  •" : "")
+					Layout.maximumWidth: 220
+					ToolTip.visible: hovered
+					ToolTip.delay: 500
+					ToolTip.text: project.hasUncommittedChanges ? "Branch (uncommitted changes)" : "Branch"
+					onClicked: branchMenu.popup(branchButton, 0, branchButton.height)
+
+					VMenu {
+						id: branchMenu
+						width: 240
+
+						Instantiator {
+							model: project.branches
+							delegate: ShortcutMenuItem {
+								required property var modelData
+								text: (modelData.isCurrent ? "✓ " : "    ") + modelData.name
+								hint: modelData.hasDraft ? "uncommitted" : ""
+								onTriggered: {
+									if (!modelData.isCurrent && project.switchBranch(modelData.name))
+										nodeCanvasArea.frameAll()
+								}
+							}
+							onObjectAdded: (index, object) => branchMenu.insertItem(index, object)
+							onObjectRemoved: (index, object) => branchMenu.removeItem(object)
+						}
+						VMenuSeparator {}
+						ShortcutMenuItem { text: "New Branch…"; onTriggered: window.newBranch("", "") }
+						ShortcutMenuItem { text: "History…"; onTriggered: window.currentTab = 1 }
+					}
+				}
+
+				VButton {
+					subtle: true
+					text: "Commit"
+					enabled: project.hasUncommittedChanges
+					onClicked: window.openCommit()
+					ToolTip.visible: hovered
+					ToolTip.delay: 500
+					ToolTip.text: "Commit this version (Ctrl+K)"
+				}
+
+				Rectangle {
+					Layout.preferredWidth: 1
+					Layout.preferredHeight: 22
+					color: theme.border
+				}
 
 				VButton {
 					subtle: true
@@ -957,6 +1124,15 @@ ApplicationWindow {
 						}
 					}
 				}
+			}
+
+			// History tab
+			HistoryPage {
+				onCommitRequested: window.openCommit()
+				onNewBranchRequested: (fromCommit, label) => window.newBranch(fromCommit, label)
+				onRenameRequested: (name) => window.renameBranch(name)
+				onDeleteRequested: (name, commitCount) => window.deleteBranch(name, commitCount)
+				onRestoreRequested: (commitId, message) => window.restoreCommit(commitId, message)
 			}
 
 			// Settings tab

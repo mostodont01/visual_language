@@ -106,6 +106,55 @@ the screen, which needs:
 sudo apt install libgbm1 libegl1 libgles2
 ```
 
+## Versions and branches
+
+Every project has a git-like history, stored inside the `.vl` file (no git
+needed, the one file is still the whole project).
+
+- **Commit** (Ctrl+K, or the Commit button) saves the current version (graph,
+  compile settings, colours and imported nodes) with a message, and saves the
+  file.
+- **Branches** are separate versions of the program, e.g. `main` and
+  `pi-motor-test`. The branch button in the toolbar (`⎇ main •`) switches
+  between them and creates new ones. The dot means uncommitted changes.
+- **Uncommitted changes stay with their branch.** Switching never asks and
+  never loses work. Come back to a branch and its changes are still there.
+- A **new branch** from the toolbar starts from what you have now and takes the
+  uncommitted changes with it, while the old branch goes back to its last
+  commit (like `git switch -c`).
+- The **History** tab lists the branches and each branch's commits with
+  what changed (“+2 nodes, −1 wire”). Hover a commit to *Restore* it (its
+  version replaces the current one; commit to keep it) or to start a *New
+  Branch Here*. Branches can be renamed and deleted there.
+
+Compile settings are part of each version, so a branch can build for another
+target (e.g. Raspberry Pi) with its own output folder. Switching branches or
+restoring a commit clears Ctrl+Z, like opening a file. Merging branches isn't
+supported yet.
+
+## Working with Claude (MCP)
+
+VL has a built-in [MCP](https://modelcontextprotocol.io) server, so Claude
+Code (or another MCP client on the same computer) can build graphs in the
+open window: add nodes, wire them, set values, import node files, compile
+and read the build log. You see every change live, and Ctrl+Z undoes it.
+
+1. In VL: **Settings → Claude (MCP server) → Allow MCP connections**
+   (or start VL with `--mcp` to turn it on for one run).
+2. Once, in a terminal: `claude mcp add --transport http vl http://127.0.0.1:7357/mcp`
+   (the Copy button next to the command in Settings copies it).
+3. In Claude Code, reconnect with `/mcp` (or restart it), then just ask,
+   e.g. "add a threshold that turns the motor off below 30 cm".
+
+Tools: `list_node_types`, `get_graph`, `edit_graph` (a batch of edits that
+applies all or nothing as one undo step), `arrange_nodes`, `import_nodes`,
+`get_project`, `set_compile_settings`, `build`, `get_build_log`,
+`save_project`, `get_history`, `commit`, `switch_branch`, `create_branch`,
+`screenshot`.
+
+The server only listens on 127.0.0.1 and refuses requests from web pages.
+It is off by default.
+
 ## Current state
 
 Early node editor front end.
@@ -124,6 +173,7 @@ Early node editor front end.
 - Nodes with an app widget have an eye toggle in their header: whether the
   widget is shown in the compiled app (which lays widgets out automatically)
 - Shift+A menu grouped by node group
+- Commits and branches stored in the project file; History tab
 
 ### Controls
 
@@ -144,17 +194,23 @@ Early node editor front end.
 | Pan / zoom | Right-drag / mouse wheel |
 | Frame all | Home, or the Frame All button |
 | Compile options | Ctrl+B, or the Compile button (Enter compiles) |
+| Commit | Ctrl+K, or the Commit button (Enter commits) |
+| Switch / new branch | The `⎇ branch` button in the toolbar; History tab |
 
 ## Structure
 
 - `main.py` — starts the app: loads the node catalog and QML
 - `node_catalog.py` — loads and validates the node JSON files
 - `graph_model.py` — nodes, values, typed connections, undo/redo, clipboard
-- `project.py` — project files (zip), unsaved changes, recent projects, compile settings, palette, imported nodes
+- `project.py` — project files (zip), unsaved changes, recent projects, compile settings, palette, imported nodes, commits and branches
+- `history.py` — version history: snapshots, commits and branches, stored under `history/` in the project file
 - `palette.json` — default group and socket type colours for new projects
 - `examples/robocars/` — importable RoboCars nodes (JSON + C++; LiDAR simulated for now)
 - `compiler.py` — compile options, graph checks and C++/CMake code generation
 - `builder.py` — runs CMake in the background and collects the build log
+- `mcp_server.py` — the MCP server (HTTP on 127.0.0.1, JSON-RPC) Claude connects to
+- `vl_tools.py` — the MCP tools: reading and editing the graph, import, build, screenshot
+- `graph_layout.py` — automatic node placement and the layered "arrange" layout
 - `runtime/vl/` — C++ runtime every compiled program uses (nodes, scheduler, widget window)
 - `runtime/cmake/` — Zig toolchains for each target, SDL2-from-source build, Linux display headers
 - `packaging/` — PyInstaller recipe, AppImage and Windows installer scripts, Linux app-menu installer, app icon
@@ -168,6 +224,9 @@ Early node editor front end.
 - `ui/components/BuildPopup.qml` — build log
 - `ui/components/MessageBox.qml` — themed message / confirmation dialog
 - `ui/components/SettingsPage.qml` — Settings tab
+- `ui/components/HistoryPage.qml` — History tab: branches and commits
+- `ui/components/CommitPopup.qml` — commit message popup
+- `ui/components/NamePopup.qml` — asks for a name (new / renamed branch)
 - `ui/components/ColorPicker.qml` — colour chooser
 - `ui/components/Toast.qml` — short fading messages
 - `ui/components/ShortcutMenuItem.qml` — menu item with a shortcut hint

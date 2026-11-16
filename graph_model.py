@@ -11,6 +11,7 @@ of sync with the actual operations.
 """
 
 import copy
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -82,6 +83,9 @@ class GraphModel(QAbstractListModel):
         self._undo_stack: list[dict] = []
         self._redo_stack: list[dict] = []
         self._clipboard: dict | None = None
+        # Inside single_undo_step(): nesting depth, and whether a snapshot was taken yet.
+        self._batch_depth = 0
+        self._batch_recorded = False
         self.graphChanged.connect(self.issuesChanged)
         self._qml_sockets: dict[str, dict] = {}
         self._build_qml_sockets()
@@ -364,11 +368,45 @@ class GraphModel(QAbstractListModel):
 
     def _record(self):
         """Store the current state for undo. Call right before changing the graph."""
+        if self._batch_depth:
+            if self._batch_recorded:
+                return  # One snapshot per batch.
+            self._batch_recorded = True
         self._undo_stack.append(self.to_dict())
         if len(self._undo_stack) > self.MAX_UNDO_STEPS:
             del self._undo_stack[0]
         self._redo_stack.clear()
         self.historyChanged.emit()
+
+    @contextmanager
+    def single_undo_step(self):
+        """Make every change inside the with-block one undo step.
+
+        If the block raises, the graph is restored to how it was before and
+        the undo history is left untouched, so a batch applies all or nothing.
+        """
+        if self._batch_depth:
+            self._batch_depth += 1
+            try:
+                yield
+            finally:
+                self._batch_depth -= 1
+            return
+
+        before = self.to_dict()
+        undo, redo = list(self._undo_stack), list(self._redo_stack)
+        self._batch_depth, self._batch_recorded = 1, False
+        try:
+            yield
+        except BaseException:
+            if self._batch_recorded:  # Something changed: put it back.
+                nodes, connections, _ = self._build(before)
+                self._replace_all(nodes, connections)
+                self._undo_stack, self._redo_stack = undo, redo
+                self.historyChanged.emit()
+            raise
+        finally:
+            self._batch_depth, self._batch_recorded = 0, False
 
     @Slot()
     def undo(self):
