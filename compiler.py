@@ -113,7 +113,24 @@ def executable_file_name(name: str, target: str) -> str:
 # Graph analysis
 # ---------------------------------------------------------------------------
 
-def feedback_connections(nodes: list[dict], connections: list[dict]) -> set[int]:
+def _input_def(catalog, nodes_by_id, node_id, socket_id):
+    node_def = catalog.get(nodes_by_id[node_id]["type"]) if node_id in nodes_by_id else None
+    return next((s for s in node_def.inputs if s.id == socket_id), None) if node_def else None
+
+
+def non_triggering_connections(nodes: list[dict], connections: list[dict], catalog) -> set[int]:
+    """Indices of wires into inputs marked "triggers": false."""
+    by_id = {n["id"]: n for n in nodes}
+    result = set()
+    for i, c in enumerate(connections):
+        s = _input_def(catalog, by_id, c["target_node"], c["target_socket"])
+        if s is not None and not s.triggers:
+            result.add(i)
+    return result
+
+
+def feedback_connections(nodes: list[dict], connections: list[dict],
+                         skip: set[int] = frozenset()) -> set[int]:
     """Indices of connections that close a feedback loop.
 
     A depth-first walk along the wires marks every wire that leads back to a
@@ -121,10 +138,15 @@ def feedback_connections(nodes: list[dict], connections: list[dict]) -> set[int]
     wires leaves no cycles, so if they don't trigger a run, nothing can run
     forever. The walk starts from nodes without incoming wires, in a fixed
     order, so the result is the same on every compile.
+
+    Wires in `skip` (non-triggering ones) are left out of the walk: they
+    can't make anything run, so they already break every loop they are in.
     """
     outgoing: dict[str, list[tuple[int, str]]] = {n["id"]: [] for n in nodes}
     has_incoming = set()
     for i, c in enumerate(connections):
+        if i in skip:
+            continue
         outgoing[c["source_node"]].append((i, c["target_node"]))
         has_incoming.add(c["target_node"])
 
@@ -151,6 +173,49 @@ def feedback_connections(nodes: list[dict], connections: list[dict]) -> set[int]
                 state[node] = 2
                 stack.pop()
     return feedback
+
+
+def wires_in_loops(nodes: list[dict], connections: list[dict], indices: set[int]) -> set[int]:
+    """The wires among `indices` that are part of a loop (their target can
+    reach their source along the wires)."""
+    outgoing: dict[str, set[str]] = {n["id"]: set() for n in nodes}
+    for c in connections:
+        outgoing.setdefault(c["source_node"], set()).add(c["target_node"])
+    result = set()
+    for i in indices:
+        source, start = connections[i]["source_node"], connections[i]["target_node"]
+        seen, todo = {start}, [start]
+        while todo:
+            node = todo.pop()
+            if node == source:
+                result.add(i)
+                break
+            for nxt in outgoing.get(node, ()):
+                if nxt not in seen:
+                    seen.add(nxt)
+                    todo.append(nxt)
+    return result
+
+
+@dataclass
+class WirePlan:
+    """How each wire behaves in the generated program."""
+    feedback: set[int]        # picked to break a loop: doesn't trigger, target starts with a value
+    non_triggering: set[int]  # into a "triggers": false input
+    loop_holds: set[int]      # non-triggering wires in a loop: target starts with a value too
+
+    def triggers(self, index: int) -> bool:
+        return index not in self.feedback and index not in self.non_triggering
+
+    def starts_with_value(self, index: int) -> bool:
+        return index in self.feedback or index in self.loop_holds
+
+
+def plan_wires(nodes: list[dict], connections: list[dict], catalog) -> WirePlan:
+    quiet = non_triggering_connections(nodes, connections, catalog)
+    return WirePlan(feedback=feedback_connections(nodes, connections, quiet),
+                    non_triggering=quiet,
+                    loop_holds=wires_in_loops(nodes, connections, quiet))
 
 
 # ---------------------------------------------------------------------------
@@ -291,7 +356,7 @@ def generate_project(
     except OSError as e:
         return GenerateResult(False, [f"Could not write the project to {output_dir}: {e.strerror}"])
 
-    feedback = len(feedback_connections(nodes, connections))
+    feedback = len(plan_wires(nodes, connections, catalog).feedback)
     messages = [
         f"Generated C++ project in {output_dir}",
         f"{len(nodes)} nodes, {len(connections)} wires"
@@ -302,10 +367,11 @@ def generate_project(
 
 
 def _main_cpp(nodes, connections, catalog, cpp_type, settings, name, gui) -> str:
-    feedback = feedback_connections(nodes, connections)
+    plan = plan_wires(nodes, connections, catalog)
     used_types = sorted({n["type"] for n in nodes})
     connected_inputs = {(c["target_node"], c["target_socket"]) for c in connections}
-    feedback_inputs = {(connections[i]["target_node"], connections[i]["target_socket"]) for i in feedback}
+    held_inputs = {(connections[i]["target_node"], connections[i]["target_socket"])
+                   for i in range(len(connections)) if plan.starts_with_value(i)}
 
     out = [
         "// Generated by VL. Do not edit: this file is rewritten on every compile.",
@@ -337,17 +403,29 @@ def _main_cpp(nodes, connections, catalog, cpp_type, settings, name, gui) -> str
                 out.append(f"    {var}.{s.id} = {_cpp_literal(values[s.id], s.type, cpp_type(s.type))};")
 
         for s in node_def.inputs:
-            out.append(f"    app.watch({var}, {var}.{s.id});")
             key = (n["id"], s.id)
+            literal = lambda v: _cpp_literal(v, s.type, cpp_type(s.type))  # noqa: E731
+            if not s.optional:
+                out.append(f"    app.watch({var}, {var}.{s.id});")
             if key not in connected_inputs:
-                # Unconnected input (only possible with a field): its field value.
-                if s.id in values:
-                    out.append(f"    {var}.{s.id}.receive({_cpp_literal(values[s.id], s.type, cpp_type(s.type))});")
-            elif key in feedback_inputs:
-                # Fed by a feedback wire: start from the field value (or the type's default).
-                initial = (_cpp_literal(values[s.id], s.type, cpp_type(s.type)) if s.id in values
-                           else f"{cpp_type(s.type)}{{}}")
-                out.append(f"    {var}.{s.id}.receive({initial});  // feedback: initial value")
+                # Unconnected input: its field value, or an optional input's default.
+                if s.widget is not None:
+                    value = literal(values.get(s.id, s.widget.default))
+                    out.append(f"    {var}.{s.id}.{'init' if s.optional else 'receive'}({value});")
+                elif s.optional and s.default is not None:
+                    out.append(f"    {var}.{s.id}.init({literal(s.default)});")
+            else:
+                start = (values.get(s.id, s.widget.default) if s.widget is not None
+                         else s.default if s.default is not None
+                         else s.widget.default if s.widget is not None else None)
+                if s.optional:
+                    if start is not None:
+                        out.append(f"    {var}.{s.id}.init({literal(start)});  // optional: until a value arrives")
+                elif key in held_inputs:
+                    # Fed by a wire in a loop that doesn't trigger: start from the
+                    # field value (or the type's default), so the loop can start.
+                    initial = literal(start) if start is not None else f"{cpp_type(s.type)}{{}}"
+                    out.append(f"    {var}.{s.id}.receive({initial});  // in a loop: initial value")
 
         if node_def.app_widget is not None:
             title_setting = node_def.app_widget.title_setting
@@ -357,10 +435,10 @@ def _main_cpp(nodes, connections, catalog, cpp_type, settings, name, gui) -> str
                        f"{_cpp_string(title or node_def.title)});")
         out.append("")
 
-    out.append("    // Wires (feedback wires don't trigger a run)")
+    out.append("    // Wires (feedback wires and wires into non-triggering inputs don't trigger a run)")
     for i, c in enumerate(connections):
         src, tgt = _cpp_identifier(c["source_node"]), _cpp_identifier(c["target_node"])
-        triggers = "false" if i in feedback else "true"
+        triggers = "true" if plan.triggers(i) else "false"
         out.append(f"    {src}.{c['source_socket']}.connect({tgt}.{c['target_socket']}, {tgt}, {triggers});")
 
     out += ["", "    return app.run();", "}", ""]

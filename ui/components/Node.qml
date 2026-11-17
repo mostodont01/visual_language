@@ -148,9 +148,12 @@ Rectangle {
 			visible: row.hasSocket
 			x: row.dotCenterX - width / 2
 			anchors.verticalCenter: parent.verticalCenter
-			width: row.dotSize
-			height: row.dotSize
-			radius: width / 2
+			// Optional inputs are diamonds: the node runs without them.
+			readonly property bool diamond: row.kind === "input" && row.modelData.optional === true
+			width: diamond ? Math.round(row.dotSize * 0.8) : row.dotSize
+			height: width
+			radius: diamond ? 2 : width / 2
+			rotation: diamond ? 45 : 0
 			scale: hitArea.containsMouse || hitArea.pressed ? 1.3 : 1.0
 			// Outputs are always filled; inputs are hollow until connected.
 			color: row.isOutput || row.connected ? row.typeColor : "#1d2025"
@@ -179,6 +182,8 @@ Rectangle {
 				color: row.kind === "setting" ? "#b9c0cb" : "#e2e7ef"
 				font.pixelSize: 11
 				font.weight: Font.Medium
+				// Non-triggering inputs: new values don't make the node run.
+				font.italic: row.kind === "input" && row.modelData.triggers === false
 			}
 
 			Text {
@@ -217,6 +222,13 @@ Rectangle {
 			height: row.height
 			hoverEnabled: true
 			cursorShape: Qt.PointingHandCursor
+			readonly property string hint: row.kind !== "input" ? ""
+				: [row.modelData.optional === true ? "Optional: the node runs without it" : "",
+				   row.modelData.triggers === false ? "A new value doesn't make the node run" : ""]
+				  .filter(t => t !== "").join("\n")
+			ToolTip.visible: containsMouse && !pressed && hint !== ""
+			ToolTip.delay: 600
+			ToolTip.text: hint
 			// Outputs leave the right button alone so right-drag still pans.
 			acceptedButtons: row.isOutput ? Qt.LeftButton : (Qt.LeftButton | Qt.RightButton)
 

@@ -192,7 +192,7 @@ private:
 | Function | Runs |
 | --- | --- |
 | `setup()` | Once at the start, after the settings are set. Open devices here. |
-| `process()` | Once at the start. After that, whenever **any input receives a new value**, but only once **every** input has had a value. It uses the latest value of every input. |
+| `process()` | Once at the start. After that, whenever **any input receives a new value**, but only once **every required** input has had a value. It uses the latest value of every input. Optional inputs and non-triggering inputs change this (see below). |
 | `runEvery(seconds)` | Call it in `setup()`: `process()` then also runs every `seconds`. Use it for sensors and anything that polls. |
 | `requestProcess()` | Run `process()` again soon, e.g. after a widget changed something. |
 | destructor `~MyNode()` | When the program ends normally (window closed, Esc). Close devices, stop motors. **Not** run on Ctrl+C or a crash. |
@@ -209,7 +209,17 @@ More rules:
     Timers are checked once per frame, so `runEvery()` faster than about
     60 Hz runs at the frame rate.
 - **Feedback loops:** a wire that loops back (A → B → A) doesn't start a run;
-  it only updates the value. Loops can't run forever.
+  it only updates the value. Loops can't run forever. To choose *which* wire
+  of a loop that is, make its input non-triggering (`"triggers": false`).
+- **Optional inputs** (`"optional": true` in the JSON, drawn as a diamond)
+  never hold the node back. Unconnected, they keep their `"default"` (or
+  the field's value). Connected, they keep the default until the first
+  value arrives. `input.connected()` tells whether a wire is attached,
+  `input.hasValue()` whether a real value has arrived.
+- **Non-triggering inputs** (`"triggers": false`, label in italics) store
+  new values without running the node. Example: a node that should run on
+  every new LiDAR scan and just use the latest position: the scan input
+  triggers, the position input doesn't.
 - **Printing:** `std::printf` shows up in VL's build log when you run the
   program from VL, or in the terminal on the robot.
 

@@ -123,6 +123,8 @@ class GraphModel(QAbstractListModel):
             "type": s.type,
             "widget": s.widget.to_qml(s.type) if s.widget else None,
             "appWidgetOnly": getattr(s, "app_widget_only", False),
+            "optional": getattr(s, "optional", False),
+            "triggers": getattr(s, "triggers", True),
         }
 
     # -- QAbstractListModel interface ---------------------------------------
@@ -224,7 +226,7 @@ class GraphModel(QAbstractListModel):
     def issues(self) -> list[dict[str, str]]:
         """Problems in the graph, errors first: [{severity, nodeId, title, message}].
 
-        error:   an input that can only be fed by a wire (no input field) is unconnected
+        error:   an input that can only be fed by a wire (no input field, not optional) is unconnected
         warning: a node has outputs but none of them is used
         """
         connected_inputs = {(c.target_node, c.target_port) for c in self.connections_dict.values()}
@@ -235,7 +237,7 @@ class GraphModel(QAbstractListModel):
             node_def = self.catalog[node.type]
             title = f"{node_def.title} ({node.id})"
             for s in node_def.inputs:
-                if s.widget is None and (node.id, s.id) not in connected_inputs:
+                if s.widget is None and not s.optional and (node.id, s.id) not in connected_inputs:
                     errors.append({"severity": "error", "nodeId": node.id, "title": title,
                                    "message": f"Input '{s.name}' ({s.type}) is not connected."})
             if node_def.outputs and node.id not in used_nodes:

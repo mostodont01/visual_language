@@ -1,0 +1,12 @@
+{
+    "id": "t_inputs", "class": "TInputs", "code": ["src/t_inputs.hpp"], "group": "Test",
+    "title": "Inputs", "description": "Prints its inputs and their state when it runs",
+    "inputs": [
+        { "id": "a", "type": "int32" },
+        { "id": "b", "type": "int32", "optional": true, "default": 5 },
+        { "id": "c", "type": "int32", "triggers": false },
+        { "id": "d", "type": "int32", "optional": true },
+        { "id": "e", "type": "int32", "optional": true, "widget": { "kind": "number", "default": 9 } }
+    ],
+    "outputs": [ { "id": "sum", "type": "int32" } ]
+}

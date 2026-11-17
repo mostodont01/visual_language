@@ -82,6 +82,13 @@ class SocketDef:
     name: str   # Display label.
     type: str   # Data type, e.g. "LidarScan", "int32", "bool".
     widget: WidgetDef | None = None  # Inputs only: editor shown while unconnected.
+    # Inputs only. An optional input never stops the node from running: it
+    # starts with `default` (or the widget's default, or T{}) and keeps it until
+    # a value arrives.
+    optional: bool = False
+    default: Any = None
+    # Inputs only. False: a new value is stored but doesn't start a run.
+    triggers: bool = True
 
 
 @dataclass(frozen=True)
@@ -192,7 +199,46 @@ def _parse_socket(raw: Any, where: str, allow_widget: bool) -> SocketDef:
             raise CatalogError(f"{where}: outputs can't have widgets")
         widget = _parse_widget(raw["widget"], data_type, where)
 
-    return SocketDef(id=sid, name=raw.get("name", sid), type=data_type, widget=widget)
+    flags = {}
+    for key in ("optional", "triggers"):
+        if key in raw:
+            if not allow_widget:
+                raise CatalogError(f"{where}: '{key}' is only for inputs")
+            if not isinstance(raw[key], bool):
+                raise CatalogError(f"{where}: '{key}' must be true or false")
+            flags[key] = raw[key]
+
+    default = None
+    if "default" in raw:
+        if not allow_widget:
+            raise CatalogError(f"{where}: 'default' is only for inputs")
+        if widget is not None:
+            raise CatalogError(f"{where}: an input with a widget takes its default from the widget")
+        default = _parse_default(raw["default"], data_type, where)
+
+    return SocketDef(id=sid, name=raw.get("name", sid), type=data_type, widget=widget,
+                     default=default, **flags)
+
+
+def _parse_default(value: Any, data_type: str, where: str) -> Any:
+    """An input's "default": only for the built-in types (custom types start as T{})."""
+    if data_type == "bool":
+        ok = isinstance(value, bool)
+    elif data_type == "string":
+        ok = isinstance(value, str)
+    elif data_type in ("int32", "float32") or is_integer_type(data_type):
+        ok = isinstance(value, (int, float)) and not isinstance(value, bool)
+        if ok and is_integer_type(data_type):
+            ok = float(value).is_integer()
+            value = int(value) if ok else value
+        elif ok:
+            value = float(value)
+    else:
+        raise CatalogError(f"{where}: 'default' is only possible for int32, float32, bool and string "
+                           f"inputs; a {data_type} input starts empty ({data_type}{{}})")
+    if not ok:
+        raise CatalogError(f"{where}: 'default' {value!r} doesn't fit the type {data_type}")
+    return value
 
 
 def _parse_setting(raw: Any, where: str) -> SettingDef:

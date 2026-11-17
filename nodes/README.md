@@ -33,7 +33,15 @@ examples.
 (JSON doesn't allow comments — they're only here for explanation.)
 
 - **inputs** — sockets on the left. An input with a `widget` shows that editor
-  while nothing is connected; without one it's a plain socket.
+  while nothing is connected; without one it's a plain socket. Extra input
+  keys:
+  - `"optional": true` — the node runs without a value on it (see below);
+    drawn as a diamond. No "unconnected input" error.
+  - `"default": value` — an optional input's starting value (only for
+    `int32`, `float32`, `bool`, `string`; inputs with a widget use the
+    widget's default). Without one: the widget default, else `T{}`.
+  - `"triggers": false` — a new value is stored but doesn't make the node
+    run (label in italics).
 - **outputs** — sockets on the right. No widgets.
 - **settings** — values on the node with no socket at all. `widget` is required.
   Add `"app_widget_only": true` to a setting that only matters for the app
@@ -97,8 +105,14 @@ public:
 - `setup()` runs once at the start; call `runEvery(seconds)` there for
   sources like sensors.
 - `process()` runs whenever an input receives a new value (using the latest
-  value of the others), once every input has a value. Wires that close a
-  feedback loop don't start a run; they only update the value.
+  value of the others), once every required input has a value. Optional
+  inputs never hold it back: unconnected they keep their default, connected
+  they keep it until the first value arrives. Inputs with `"triggers": false`
+  and wires that close a feedback loop don't start a run; they only update
+  the value. A non-triggering wire inside a loop starts with the field
+  value or the default, so the loop can start.
+- `input.connected()`: a wire is attached; `input.hasValue()`: a value has
+  arrived (an optional input's default doesn't count).
 - `requestProcess()` runs `process()` again, e.g. after a widget changed.
 
 See `runtime/vl/runtime.hpp` for the details, `nodes/src/` for the built-in

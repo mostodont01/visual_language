@@ -1,0 +1,6 @@
+{
+    "id": "t_print", "class": "TPrint", "code": ["src/t_print.hpp"], "group": "Test",
+    "title": "Print", "description": "Prints label and value when it runs",
+    "settings": [ { "id": "label", "type": "string", "widget": { "kind": "string", "default": "p" } } ],
+    "inputs": [ { "id": "value", "type": "int32" } ]
+}

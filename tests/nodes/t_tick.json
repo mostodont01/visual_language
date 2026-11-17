@@ -1,0 +1,11 @@
+{
+    "id": "t_tick", "class": "TTick", "code": ["src/t_tick.hpp"], "group": "Test",
+    "title": "Tick", "description": "Sends start, start+1, ... every interval seconds, count times",
+    "settings": [
+        { "id": "count", "type": "int32", "widget": { "kind": "number", "default": 3 } },
+        { "id": "start", "type": "int32", "widget": { "kind": "number", "default": 1 } },
+        { "id": "skip", "type": "int32", "widget": { "kind": "number", "default": 0 } },
+        { "id": "interval", "type": "float32", "widget": { "kind": "number", "default": 1 } }
+    ],
+    "outputs": [ { "id": "value", "type": "int32" } ]
+}

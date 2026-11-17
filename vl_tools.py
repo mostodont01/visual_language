@@ -129,6 +129,12 @@ def _socket(s) -> dict[str, Any]:
     data = {"id": s.id, "name": s.name, "type": s.type}
     if getattr(s, "widget", None) is not None:
         data["widget"] = _widget(s.widget)
+    if getattr(s, "optional", False):
+        data["optional"] = True
+        if s.default is not None:
+            data["default"] = s.default
+    if not getattr(s, "triggers", True):
+        data["triggers"] = False
     return data
 
 

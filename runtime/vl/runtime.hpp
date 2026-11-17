@@ -11,9 +11,14 @@
 // outputs to inputs and runs vl::App.
 //
 // When a node runs: whenever one of its inputs receives a new value, using
-// the latest value of every other input, and only once every input has had
-// a value. Wires that close a feedback loop don't start a run; they only
-// update the stored value, so loops can't run forever.
+// the latest value of every other input, and only once every required input
+// has had a value. Exceptions:
+//   - optional inputs ("optional": true) never hold a node back: they start
+//     with their default and keep it until a value arrives;
+//   - non-triggering inputs ("triggers": false) store new values without
+//     starting a run;
+//   - wires that close a feedback loop don't start a run either; they only
+//     update the stored value, so loops can't run forever.
 #pragma once
 
 #include <cstdint>
@@ -35,13 +40,22 @@ class Node;
 // VL_STOP_AFTER=<seconds> ends a headless run after that long on this clock.
 double now();
 
+template <typename T> class Output;
+
 // The part of every input the runtime needs to see.
 class InputBase {
 public:
+    // A value has arrived (over a wire, or from the input's field).
+    // An optional input's default doesn't count.
     bool hasValue() const { return hasValue_; }
+    // A wire is connected to this input.
+    bool connected() const { return connected_; }
 
 protected:
+    template <typename T> friend class Output;
+
     bool hasValue_ = false;
+    bool connected_ = false;
 };
 
 template <typename T>
@@ -55,6 +69,10 @@ public:
         value_ = value;
         hasValue_ = true;
     }
+
+    // Set the starting value of an optional input (doesn't count as a value
+    // having arrived).
+    void init(const T& value) { value_ = value; }
 
 private:
     T value_{};
@@ -116,6 +134,7 @@ public:
 
     // Used by the generated code. Feedback wires have triggers = false.
     void connect(Input<T>& input, Node& node, bool triggers) {
+        input.connected_ = true;
         links_.push_back({&input, &node, triggers});
     }
 
@@ -144,7 +163,7 @@ public:
         return ref;
     }
 
-    // Inputs the node needs a value on before it can run.
+    // Inputs the node needs a value on before it can run (not optional ones).
     void watch(Node& node, const InputBase& input);
     void setWidget(Node& node, bool visible, const std::string& title);
 
