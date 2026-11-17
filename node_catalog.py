@@ -19,6 +19,8 @@ class CatalogError(Exception):
 
 
 WIDGET_KINDS = ("number", "string", "select", "checkbox")
+# The socket type of execution wires (flows, see runtime/vl/flow.hpp).
+EXEC_TYPE = "exec"
 
 
 def is_integer_type(data_type: str) -> bool:
@@ -136,6 +138,16 @@ class NodeDef:
     cpp_class: str = ""       # The C++ class implementing the node ("class").
     types: dict[str, TypeDef] = field(default_factory=dict)  # Custom socket types it declares.
 
+    @property
+    def is_flow(self) -> bool:
+        """A flow node: it has exec sockets and runs in execution order."""
+        return any(s.type == EXEC_TYPE for s in self.inputs + self.outputs)
+
+    @property
+    def is_flow_entry(self) -> bool:
+        """A flow node without exec input starts a flow (On Start, On Event)."""
+        return self.is_flow and not any(s.type == EXEC_TYPE for s in self.inputs)
+
     def socket_types(self) -> set[str]:
         return {s.type for s in self.inputs + self.outputs}
 
@@ -198,6 +210,11 @@ def _parse_socket(raw: Any, where: str, allow_widget: bool) -> SocketDef:
         if not allow_widget:
             raise CatalogError(f"{where}: outputs can't have widgets")
         widget = _parse_widget(raw["widget"], data_type, where)
+
+    if data_type == EXEC_TYPE:
+        extra = [k for k in ("widget", "optional", "default", "triggers") if k in raw]
+        if extra:
+            raise CatalogError(f"{where}: exec sockets can't have {', '.join(repr(k) for k in extra)}")
 
     flags = {}
     for key in ("optional", "triggers"):

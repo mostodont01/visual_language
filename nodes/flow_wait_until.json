@@ -1,0 +1,12 @@
+{
+    "id": "flow_wait_until",
+    "class": "vl::WaitUntil",
+    "group": "Flow",
+    "title": "Wait Until",
+    "description": "Waits until Condition is true",
+    "inputs": [
+        { "id": "run", "name": "Run", "type": "exec" },
+        { "id": "condition", "name": "Condition", "type": "bool" }
+    ],
+    "outputs": [ { "id": "then", "name": "Then", "type": "exec" } ]
+}

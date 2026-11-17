@@ -17,7 +17,10 @@ from typing import Any
 
 from PySide6.QtCore import QAbstractListModel, QModelIndex, Qt, Slot, Signal, Property
 
-from node_catalog import NodeDef
+from node_catalog import EXEC_TYPE, NodeDef
+
+# The start-up flow's entry node (built in).
+ON_START_TYPE = "flow_on_start"
 
 
 @dataclass
@@ -227,22 +230,44 @@ class GraphModel(QAbstractListModel):
         """Problems in the graph, errors first: [{severity, nodeId, title, message}].
 
         error:   an input that can only be fed by a wire (no input field, not optional) is unconnected
+        error:   more than one On Start
         warning: a node has outputs but none of them is used
+        warning: a flow node no flow reaches, or an exec output without a wire (the flow ends there)
         """
-        connected_inputs = {(c.target_node, c.target_port) for c in self.connections_dict.values()}
-        used_nodes = {c.source_node for c in self.connections_dict.values()}
+        connections = list(self.connections_dict.values())
+        connected_inputs = {(c.target_node, c.target_port) for c in connections}
+        connected_outputs = {(c.source_node, c.source_port) for c in connections}
+        used_nodes = {c.source_node for c in connections}
         errors, warnings = [], []
 
         for node in self.nodes:
             node_def = self.catalog[node.type]
             title = f"{node_def.title} ({node.id})"
             for s in node_def.inputs:
+                if s.type == EXEC_TYPE:
+                    continue
                 if s.widget is None and not s.optional and (node.id, s.id) not in connected_inputs:
                     errors.append({"severity": "error", "nodeId": node.id, "title": title,
                                    "message": f"Input '{s.name}' ({s.type}) is not connected."})
-            if node_def.outputs and node.id not in used_nodes:
+            if node_def.is_flow:
+                exec_in = [s for s in node_def.inputs if s.type == EXEC_TYPE]
+                if exec_in and not any((node.id, s.id) in connected_inputs for s in exec_in):
+                    warnings.append({"severity": "warning", "nodeId": node.id, "title": title,
+                                     "message": "No flow reaches this node (connect its exec input)."})
+                for s in node_def.outputs:
+                    if s.type == EXEC_TYPE and (node.id, s.id) not in connected_outputs:
+                        warnings.append({"severity": "warning", "nodeId": node.id, "title": title,
+                                         "message": f"The flow ends at '{s.name}' (no end node such as "
+                                                    "Start Main or Resume Main)."})
+            elif node_def.outputs and node.id not in used_nodes:
                 warnings.append({"severity": "warning", "nodeId": node.id, "title": title,
                                  "message": "Output is not used."})
+
+        starts = [n for n in self.nodes if n.type == ON_START_TYPE]
+        for extra in starts[1:]:
+            title = f"{self.catalog[extra.type].title} ({extra.id})"
+            errors.append({"severity": "error", "nodeId": extra.id, "title": title,
+                           "message": "A program can only have one On Start."})
 
         return errors + warnings
 
@@ -351,7 +376,11 @@ class GraphModel(QAbstractListModel):
             if not s_sock or not t_sock or s_sock.type != t_sock.type:
                 warnings.append(f"Skipped invalid connection {sn}.{sp} -> {tn}.{tp}.")
                 continue
-            if any(c.target_node == tn and c.target_port == tp for c in connections.values()):
+            if s_sock.type == EXEC_TYPE:
+                if any(c.source_node == sn and c.source_port == sp for c in connections.values()):
+                    warnings.append(f"Skipped extra exec wire from {sn}.{sp}.")
+                    continue
+            elif any(c.target_node == tn and c.target_port == tp for c in connections.values()):
                 warnings.append(f"Skipped extra connection into {tn}.{tp}.")
                 continue
 
@@ -664,12 +693,19 @@ class GraphModel(QAbstractListModel):
         return self._validate_connection(source_node, source_port, target_node, target_port) is None
 
     def _connect(self, source_node: str, source_port: str, target_node: str, target_port: str):
-        """Add a (validated) wire, replacing any wire already on the target input."""
+        """Add a (validated) wire, replacing any wire already on the target input.
+
+        Exec wires are the other way round: an exec output has one wire (it's
+        replaced), an exec input may have many.
+        """
+        s_sock = self.find_socket(self.find_node(source_node), source_port, is_output=True)
         for cid, conn in list(self.connections_dict.items()):
-            if conn.target_node == target_node and conn.target_port == target_port:
+            if s_sock.type == EXEC_TYPE:
+                if conn.source_node == source_node and conn.source_port == source_port:
+                    del self.connections_dict[cid]
+            elif conn.target_node == target_node and conn.target_port == target_port:
                 del self.connections_dict[cid]
 
-        s_sock = self.find_socket(self.find_node(source_node), source_port, is_output=True)
         cid = connection_id(source_node, source_port, target_node, target_port)
         self.connections_dict[cid] = Connection(
             cid, source_node, source_port, target_node, target_port, s_sock.type

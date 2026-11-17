@@ -166,23 +166,22 @@ It is off by default.
 
 ## Current state
 
-Early node editor front end.
+Usable: RoboCars is programmed with it.
 
-- Typed nodes and sockets; only wires between matching types are allowed.
-  Feedback loops (including a node feeding itself) are allowed.
-- Nodes are defined by JSON files (see `nodes/README.md`), including inline
-  fields shown on unconnected inputs and node settings. General nodes are
-  built in (`nodes/`); your own nodes are imported into a project with
-  File → Import Nodes… (Ctrl+I) (try `examples/robocars/`)
-- Projects are saved as `.vl` files (a zip with the graph, settings and
-  imported nodes); startup screen with recent projects
-- Settings tab: group and socket type colours, imported nodes
-- Issues pill: click an issue to jump to its node
-- Undo/redo for adding, deleting, moving, connecting and editing values
-- Nodes with an app widget have an eye toggle in their header: whether the
-  widget is shown in the compiled app (which lays widgets out automatically)
-- Shift+A menu grouped by node group
-- Commits and branches stored in the project file; History tab
+- Node editor: typed nodes and sockets (only matching types connect),
+  feedback loops, inline value fields, settings, app-widget eye toggle,
+  Shift+A menu, undo/redo, copy/paste, box select, issues list
+- Nodes defined by JSON + C++ (`nodes/README.md`, `tutorial.md`); built-in
+  nodes in `nodes/`, your own imported into a project (Ctrl+I)
+- Inputs can be optional (diamond) or non-triggering (italic label)
+- **Flows** (group Flow): start-up and event sequences on white exec wires
+  (On Start → … → Start Main before the main tree; On Event for
+  emergencies), with Wait, Wait Until, Branch, Log, Restart, Stop Program
+- Projects are `.vl` files (zip) with commits and branches; History tab
+- Compiler to C++ with incremental builds, cross-compiling for Raspberry Pi
+  and Windows, fast simulated time for tests (`VL_FAST=1`)
+- MCP server so Claude can build graphs in the open window
+- Tests: `python -m pytest tests` (headless; builds and runs small graphs)
 
 ### Controls
 
@@ -214,13 +213,14 @@ Early node editor front end.
 - `project.py` — project files (zip), unsaved changes, recent projects, compile settings, palette, imported nodes, commits and branches
 - `history.py` — version history: snapshots, commits and branches, stored under `history/` in the project file
 - `palette.json` — default group and socket type colours for new projects
+- `tests/` — pytest suite; `tests/nodes/` are small C++ nodes the runtime tests build
 - `examples/robocars/` — importable RoboCars nodes (JSON + C++; LiDAR simulated for now)
 - `compiler.py` — compile options, graph checks and C++/CMake code generation
 - `builder.py` — runs CMake in the background and collects the build log
 - `mcp_server.py` — the MCP server (HTTP on 127.0.0.1, JSON-RPC) Claude connects to
 - `vl_tools.py` — the MCP tools: reading and editing the graph, import, build, screenshot
 - `graph_layout.py` — automatic node placement and the layered "arrange" layout
-- `runtime/vl/` — C++ runtime every compiled program uses (nodes, scheduler, widget window)
+- `runtime/vl/` — C++ runtime every compiled program uses (nodes, scheduler, flows, values file, widget window)
 - `runtime/cmake/` — Zig toolchains for each target, SDL2-from-source build, Linux display headers
 - `packaging/` — PyInstaller recipe, AppImage and Windows installer scripts, Linux app-menu installer, app icon
 - `tools/update_linux_headers.py` — rebuilds the bundled Linux display headers

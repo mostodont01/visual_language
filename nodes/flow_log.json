@@ -1,0 +1,12 @@
+{
+    "id": "flow_log",
+    "class": "vl::Log",
+    "group": "Flow",
+    "title": "Log",
+    "description": "Prints a message",
+    "inputs": [
+        { "id": "run", "name": "Run", "type": "exec" },
+        { "id": "message", "name": "Message", "type": "string", "widget": { "kind": "string", "default": "" } }
+    ],
+    "outputs": [ { "id": "then", "name": "Then", "type": "exec" } ]
+}

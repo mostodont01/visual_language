@@ -81,6 +81,16 @@ widget title (otherwise the node title).
 The widget is drawn by the node's C++ class in `drawWidget()` with
 [Dear ImGui](https://github.com/ocornut/imgui), inside `#ifdef VL_GUI`.
 
+## Flow nodes
+
+Sockets of type `"exec"` are execution wires (flows: start-up and event
+sequences, see `runtime/vl/flow.hpp` and the tutorial). A node with exec
+sockets is a flow node: its class derives from `vl::FlowNode` and implements
+`start()` / `update()` instead of `process()`. Exec sockets can't have
+widgets or the input keys above, and have no C++ member. An exec output takes
+one wire, an exec input many. The built-in flow nodes (`flow_*.json`) are
+implemented in the runtime (`"class": "vl::Wait"` etc., no `code`).
+
 ## The C++ class
 
 `"class"` names the C++ class implementing the node, defined in one of its
@@ -114,6 +124,10 @@ public:
 - `input.connected()`: a wire is attached; `input.hasValue()`: a value has
   arrived (an optional input's default doesn't count).
 - `requestProcess()` runs `process()` again, e.g. after a widget changed.
+- `wakeAt(time)` runs `process()` once at that time (on `vl::now()`).
+- `stop()`: the node stops running (an event flow stopped the main tree, or
+  the program ends, also on Ctrl+C / SIGTERM). Make hardware safe here.
+- `reset()`: before a Restart flow end runs the start-up flow again.
 
 See `runtime/vl/runtime.hpp` for the details, `nodes/src/` for the built-in
 nodes and `examples/robocars/` for nodes with separate `.cpp` files.

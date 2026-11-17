@@ -105,6 +105,14 @@ public:
     // Draw the node's app widget with Dear ImGui. Only called for nodes with
     // an app widget that is shown; wrap the body in #ifdef VL_GUI.
     virtual void drawWidget() {}
+    // Make the node safe: called when the node stops running because an
+    // event flow stopped the main tree, and when the program ends (also on
+    // Ctrl+C / SIGTERM). A motor node sets its outputs to zero here. May be
+    // called more than once.
+    virtual void stop() {}
+    // Called on every node before a Restart flow end runs the start-up flow
+    // again: forget state from the previous run.
+    virtual void reset() {}
 
 protected:
     // Call from setup(): additionally run process() every `seconds`
@@ -112,14 +120,24 @@ protected:
     void runEvery(double seconds);
     // Run process() again soon, e.g. after the user changed a widget.
     void requestProcess();
+    // Run process() (flow nodes: update()) once at that time (on vl::now()).
+    void wakeAt(double time);
 
 private:
     friend class App;
+    friend class FlowNode;
     template <typename T> friend class Output;
 
     bool vlReady() const;
 
     App* vlApp_ = nullptr;
+    // Flow nodes (see vl/flow.hpp): set by App, null for data nodes.
+    class FlowNode* vlFlow_ = nullptr;
+    // Groups the node belongs to (bit 0: main tree, 1: always, 2+: flows);
+    // it runs while one of them is active.
+    uint64_t vlGroups_ = 1;
+    bool vlPending_ = false;   // Wanted to run while not active.
+    double vlWakeAt_ = 0;      // 0 = no wake-up planned.
     const NodeType* vlType_ = nullptr;  // Set for nodes made by App::create().
     std::string vlId_;
     std::string vlTitle_;
@@ -302,6 +320,49 @@ private:
     int errors_ = 0;
     std::vector<std::unique_ptr<Node>> nodes_;
     std::deque<Node*> queue_;
+
+    // -- Flows (vl/flow.hpp) --
+public:
+    static constexpr uint64_t GroupMain = 1;
+    static constexpr uint64_t GroupAlways = 2;
+
+    // Used by the generated code for graphs with flows.
+    void connectExec(Node& from, int output, Node& to);
+    void addFlowEntry(Node& entry, int group);   // group: the flow's bit (2..63)
+    void setGroups(Node& node, uint64_t groups);
+
+private:
+    friend class FlowNode;
+
+    bool runnable(const Node& node) const;
+    void setActive(uint64_t groups);
+    void requestFlow(FlowNode& entry, int priority);
+    void handleFlowRequest();
+    void startFlow(FlowNode& entry, int priority);
+    void step(int result);
+    void endFlow();
+    void startMain();
+    void resumeMain();
+    void restart();
+    void runStartUp();
+    void quit(int code);
+    void stopAll();
+
+    uint64_t active_ = GroupMain | GroupAlways;
+    FlowNode* startEntry_ = nullptr;    // On Start, if the graph has one
+    FlowNode* flowEntry_ = nullptr;     // entry of the flow that runs now (or null)
+    FlowNode* flowAt_ = nullptr;        // the node it is at
+    int flowPriority_ = 0;
+    bool mainStarted_ = false;          // the main tree ran since the last (re)start
+    FlowNode* requested_ = nullptr;     // an entry that fired, handled after its process()
+    int requestedPriority_ = 0;
+    bool flowStarting_ = false;         // a flow started: step it once the queue is done
+    bool stepPending_ = false;          // a flow made many steps without waiting: go on next pass
+    int pendingResult_ = 0;
+    bool quit_ = false;
+    int exitCode_ = 0;
 };
 
 }  // namespace vl
+
+#include "vl/flow.hpp"

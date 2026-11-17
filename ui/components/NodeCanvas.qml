@@ -114,6 +114,27 @@ Item {
 		return ids
 	}
 
+	function findOutgoingConnection(nodeId, socketId) {
+		for (var i = 0; i < root.connections.length; i++) {
+			var c = root.connections[i]
+			if (c.sourceNode === nodeId && c.sourcePort === socketId)
+				return c
+		}
+		return null
+	}
+
+	function socketType(nodeId, socketId, isOutput) {
+		var delegate = findNodeDelegate(nodeId)
+		if (!delegate)
+			return ""
+		var sockets = isOutput ? delegate.nodeOutputs : delegate.nodeInputs
+		for (var i = 0; i < sockets.length; i++) {
+			if (sockets[i].id === socketId)
+				return sockets[i].type
+		}
+		return ""
+	}
+
 	function findIncomingConnection(nodeId, socketId) {
 		for (var i = 0; i < root.connections.length; i++) {
 			var c = root.connections[i]
@@ -193,19 +214,29 @@ Item {
 	// Pressing an output starts a new wire. Pressing an unconnected input
 	// starts a wire backwards (towards an output). Pressing a connected input
 	// picks up its existing wire, so it can be moved to another input or
-	// dropped on empty canvas to delete it.
+	// dropped on empty canvas to delete it. Exec sockets (flows) are the
+	// other way round: an exec output has one wire, which pressing it picks
+	// up; an exec input takes many, so pressing it starts a new wire.
 	function startWireDrag(nodeId, socketId, isOutput) {
 		var anchorNode = nodeId
 		var anchorSocket = socketId
 		var fromOutput = isOutput
 		var detached = null
+		var exec = socketType(nodeId, socketId, isOutput) === "exec"
 
-		if (!isOutput) {
+		if (!isOutput && !exec) {
 			detached = findIncomingConnection(nodeId, socketId)
 			if (detached) {
 				anchorNode = detached.sourceNode
 				anchorSocket = detached.sourcePort
 				fromOutput = true
+			}
+		} else if (isOutput && exec) {
+			detached = findOutgoingConnection(nodeId, socketId)
+			if (detached) {
+				anchorNode = detached.targetNode
+				anchorSocket = detached.targetPort
+				fromOutput = false
 			}
 		}
 
@@ -231,10 +262,10 @@ Item {
 		dragWire.detachedNodeId = detached ? nodeId : ""
 		dragWire.detachedSocketId = detached ? socketId : ""
 
-		// A picked-up wire starts snapped to the input it came from, so a
-		// plain click on a connected input leaves the wire unchanged.
+		// A picked-up wire starts snapped to the socket it came from, so a
+		// plain click on a connected socket leaves the wire unchanged.
 		if (detached) {
-			var originPos = getSocketWorldPos(nodeId, socketId, false)
+			var originPos = getSocketWorldPos(nodeId, socketId, isOutput)
 			setSnap(nodeId, socketId, originPos.x, originPos.y)
 			dragWire.cursorWorldX = originPos.x
 			dragWire.cursorWorldY = originPos.y
@@ -519,9 +550,10 @@ Item {
 	// coordinates. Wires leave outputs to the right and enter inputs from the left.
 	// If loopY is given and the input is left of the output (a feedback wire),
 	// the wire is routed below the nodes at loopY instead of behind them.
-	function drawWire(ctx, x1, y1, x2, y2, color, dashed, loopY) {
+	function drawWire(ctx, x1, y1, x2, y2, color, dashed, loopY, thick) {
 		ctx.strokeStyle = color
-		ctx.lineWidth = Math.max(2.0, 3.0 * root.zoomFactor)
+		// Exec wires (flows) are thicker.
+		ctx.lineWidth = Math.max(2.0, 3.0 * root.zoomFactor) * (thick ? 1.7 : 1.0)
 		ctx.lineCap = "round"
 		ctx.setLineDash(dashed ? [6, 4] : [])
 		ctx.beginPath()
@@ -699,7 +731,7 @@ Item {
 					root.toScreenX(src.x), root.toScreenY(src.y),
 					root.toScreenX(tgt.x), root.toScreenY(tgt.y),
 					root.typeColor(conn.dataType), false,
-					root.loopYBelow(conn.sourceNode, conn.targetNode))
+					root.loopYBelow(conn.sourceNode, conn.targetNode), conn.dataType === "exec")
 			}
 		}
 	}
@@ -876,10 +908,11 @@ Item {
 			var color = root.typeColor(dragWire.dataType)
 
 			// Always draw output -> input so the curve bends the right way.
+			var thick = dragWire.dataType === "exec"
 			if (dragWire.fromOutput)
-				root.drawWire(ctx, anchorX, anchorY, endX, endY, color, !dragWire.snapped)
+				root.drawWire(ctx, anchorX, anchorY, endX, endY, color, !dragWire.snapped, undefined, thick)
 			else
-				root.drawWire(ctx, endX, endY, anchorX, anchorY, color, !dragWire.snapped)
+				root.drawWire(ctx, endX, endY, anchorX, anchorY, color, !dragWire.snapped, undefined, thick)
 
 			if (dragWire.snapped) {
 				ctx.fillStyle = color

@@ -98,7 +98,13 @@ live and can undo your edits with Ctrl+Z.
   conversions). An input takes one wire; outputs can feed many inputs. Loops are allowed
   (feedback).
 - Inputs with a widget have a value used while unconnected; settings are values with
-  no socket. Set both with set_values.
+  no socket. Set both with set_values. "optional" inputs need no wire; inputs with
+  "triggers": false store values without making the node run.
+- Flows (group "Flow"): sequences in execution order, wired through 'exec' sockets. On
+  Start -> ... -> Start Main runs before the main dataflow graph starts; On Event (bool
+  trigger, priority) stops the main graph and runs its flow, ending at Resume Main,
+  Restart or Stop Program. Wait / Wait Until / Branch / Log in between. An exec output
+  takes one wire, an exec input many.
 - Make all related changes in one edit_graph call: it applies all or nothing and is one
   undo step. Leave x/y out and VL places new nodes next to the nodes they connect to.
 - get_graph lists issues: an error is an input that needs a wire; a warning is an unused
@@ -189,7 +195,8 @@ class VlTools(QObject):
                  "- move_node: node, x, y (canvas coordinates; nodes are 230 wide, y grows downwards).\n"
                  "- set_values: node, values ({input-or-setting id: value}).\n"
                  "- connect: source_node, source_socket (an output), target_node, target_socket (an input). "
-                 "Replaces a wire already on that input.\n"
+                 "Replaces a wire already on that input. Exec sockets (type 'exec', flows) are the other "
+                 "way round: an exec output has one wire (replaced), an exec input can have many.\n"
                  "- disconnect: target_node, target_socket.\n"
                  "- set_widget_visible: node, visible (show the node's widget in the compiled app).\n"
                  "Returns the ids of added nodes (by ref) and the graph's issues afterwards.",
@@ -449,12 +456,21 @@ class VlTools(QObject):
                                     error += (f" Inputs of {op['target_node']}: "
                                               f"{', '.join(s.id for s in t_def.inputs) or 'none'}.")
                                 raise ToolError(error)
-                            replaced = next((c for c in graph.connections_dict.values()
-                                             if c.target_node == tn and c.target_port == tp
-                                             and (c.source_node, c.source_port) != (sn, sp)), None)
-                            if replaced:
-                                notes.append(f"{tn}.{tp} was fed by {replaced.source_node}."
-                                             f"{replaced.source_port}; that wire was replaced.")
+                            exec_wire = graph.find_socket(graph.find_node(sn), sp, True).type == "exec"
+                            if exec_wire:
+                                replaced = next((c for c in graph.connections_dict.values()
+                                                 if c.source_node == sn and c.source_port == sp
+                                                 and (c.target_node, c.target_port) != (tn, tp)), None)
+                                if replaced:
+                                    notes.append(f"{sn}.{sp} led to {replaced.target_node}."
+                                                 f"{replaced.target_port}; that exec wire was replaced.")
+                            else:
+                                replaced = next((c for c in graph.connections_dict.values()
+                                                 if c.target_node == tn and c.target_port == tp
+                                                 and (c.source_node, c.source_port) != (sn, sp)), None)
+                                if replaced:
+                                    notes.append(f"{tn}.{tp} was fed by {replaced.source_node}."
+                                                 f"{replaced.source_port}; that wire was replaced.")
                             graph.addConnection(sn, sp, tn, tp)
                             counts["wired"] += 1
 

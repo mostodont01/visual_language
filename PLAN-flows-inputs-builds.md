@@ -169,3 +169,41 @@ exactly as before (RoboCars bench unchanged).
     so the named `#ifndef ROBOCARS_X_HPP` guards aren't needed any more (they don't hurt).
   - Settings are assigned from the values file: a setting's C++ member must be a number, `bool`,
     `std::string`, or a type constructible from `std::string`.
+- **Step 3 (flows):**
+  - Node JSON: socket `"type": "exec"` (no widget / optional / default / triggers; no C++ member).
+    Built-in flow nodes `flow_on_start`, `flow_on_event` (input `trigger`, setting `priority`),
+    `flow_start_main`, `flow_resume_main`, `flow_restart`, `flow_stop_program`, `flow_wait`
+    (input `seconds`), `flow_wait_until` / `flow_branch` (input `condition`, Branch outputs
+    `if_true` / `if_false`), `flow_log` (input `message`). Exec inputs are called `run`, outputs `then`.
+  - C++: `vl::FlowNode` (`start()`, `update()` returning `Running` or an exec output number),
+    new virtual hooks on every node: `stop()` (main tree stopped by an event, program end incl.
+    Ctrl+C / SIGTERM) and `reset()` (before Restart), and `wakeAt(time)`.
+    **`SimulateDrive::reset()` now overrides `vl::Node::reset()`**: it runs on a Restart flow end
+    (which fits) and nowhere else. A motor node should implement `stop()` (outputs to zero).
+  - Runtime: `vl::now()` now runs on the fast clock already in `setup()` (before, `setup()` saw real
+    time in fast mode). No RoboCars node reads the clock in `setup()`; bench results unchanged.
+  - Graphs without flow nodes generate the same code as before (no flow lines in `main.cpp`).
+
+## Decisions made without asking (night of 2026-11-17)
+
+- **Look of flows:** exec sockets are white rounded squares, exec wires white and 1.7x thicker; the
+  socket order stays as for data (outputs first, then inputs). Flow group colour rose (`#fb7185`).
+  Optional inputs: diamond sockets. Non-triggering inputs: label in italics (+ tooltip).
+- **Exec wire editing:** pressing a connected exec output picks up its wire (like pressing a
+  connected data input); pressing an exec input always starts a new wire.
+- **update() is event-driven**, not called on every loop pass: after `start()`, then on input
+  changes, timers (`runEvery`, `wakeAt`) and `requestProcess()`. Same effect, but keeps fast mode
+  jumping straight to the next timer.
+- **Resume Main after an interrupted start-up flow** runs the start-up flow again (main never ran).
+  An interrupted lower-priority event flow is dropped, not resumed. Equal priority doesn't interrupt.
+- **A flow that reaches an exec output without a wire** just ends: afterwards only the always-on
+  nodes (event triggers) run. The issues list warns about it.
+- **Data nodes during a flow:** upstream of the flow nodes' data inputs (as planned) **plus** data
+  nodes downstream of flow nodes' data outputs (so a flow node driving e.g. an LED node works).
+- **stop() runs on every node that becomes inactive** (main tree stopped) and on every node at exit;
+  nodes that are also needed by the event flow or always on keep running and aren't stopped.
+- **The values file** sits next to the program (`<name>.values.json`), the program refuses to start
+  without it (safer for a robot than silently running with defaults).
+- **Persistent build folder**: kept the existing `<output>/build/<target>` (already persistent),
+  instead of moving builds to `~/.cache/vl/`.
+

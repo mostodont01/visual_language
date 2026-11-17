@@ -1,0 +1,8 @@
+{
+    "id": "flow_restart",
+    "class": "vl::RestartNode",
+    "group": "Flow",
+    "title": "Restart",
+    "description": "End of a flow: reset every node and run the start-up flow again",
+    "inputs": [ { "id": "run", "name": "Run", "type": "exec" } ]
+}

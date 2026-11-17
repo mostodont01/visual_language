@@ -1,0 +1,10 @@
+{
+    "id": "flow_on_event",
+    "class": "vl::OnEvent",
+    "group": "Flow",
+    "title": "On Event",
+    "description": "When Trigger turns true (in any phase): stops the main tree (or a lower-priority flow) and runs this flow",
+    "inputs": [ { "id": "trigger", "name": "Trigger", "type": "bool" } ],
+    "settings": [ { "id": "priority", "name": "Priority", "type": "int32", "widget": { "kind": "number", "default": 0 } } ],
+    "outputs": [ { "id": "then", "name": "Then", "type": "exec" } ]
+}

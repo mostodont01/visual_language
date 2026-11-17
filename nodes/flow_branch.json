@@ -1,0 +1,15 @@
+{
+    "id": "flow_branch",
+    "class": "vl::Branch",
+    "group": "Flow",
+    "title": "Branch",
+    "description": "Continues on True or False",
+    "inputs": [
+        { "id": "run", "name": "Run", "type": "exec" },
+        { "id": "condition", "name": "Condition", "type": "bool" }
+    ],
+    "outputs": [
+        { "id": "if_true", "name": "True", "type": "exec" },
+        { "id": "if_false", "name": "False", "type": "exec" }
+    ]
+}

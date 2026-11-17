@@ -1,0 +1,9 @@
+{
+    "id": "t_counter", "class": "TCounter", "code": ["src/t_counter.hpp"], "group": "Test",
+    "title": "Counter", "description": "Counts every interval and prints; prints on stop() and reset()",
+    "settings": [
+        { "id": "label", "type": "string", "widget": { "kind": "string", "default": "count" } },
+        { "id": "interval", "type": "float32", "widget": { "kind": "number", "default": 1 } }
+    ],
+    "outputs": [ { "id": "count", "type": "int32" } ]
+}

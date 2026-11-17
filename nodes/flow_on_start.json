@@ -1,0 +1,8 @@
+{
+    "id": "flow_on_start",
+    "class": "vl::OnStart",
+    "group": "Flow",
+    "title": "On Start",
+    "description": "Start of the start-up flow. The main tree waits until the flow reaches Start Main.",
+    "outputs": [ { "id": "then", "name": "Then", "type": "exec" } ]
+}

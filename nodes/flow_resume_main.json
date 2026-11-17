@@ -1,0 +1,8 @@
+{
+    "id": "flow_resume_main",
+    "class": "vl::ResumeMainNode",
+    "group": "Flow",
+    "title": "Resume Main",
+    "description": "End of an event flow: back to the main tree (or the start-up flow, if that was interrupted)",
+    "inputs": [ { "id": "run", "name": "Run", "type": "exec" } ]
+}

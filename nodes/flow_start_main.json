@@ -1,0 +1,8 @@
+{
+    "id": "flow_start_main",
+    "class": "vl::StartMainNode",
+    "group": "Flow",
+    "title": "Start Main",
+    "description": "End of the start-up flow: the main tree starts",
+    "inputs": [ { "id": "run", "name": "Run", "type": "exec" } ]
+}

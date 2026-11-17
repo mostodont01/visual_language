@@ -550,7 +550,91 @@ sudo usermod -aG dialout,i2c,gpio,video $USER   # then log out and back in
   `runEvery(0.1)`), not only when it changes.
 - **Testing:** test new motor code with the wheels off the ground.
 
-## 9. From graph to robot
+## 9. Flows: start-up, emergencies and other sequences
+
+The graph you've built so far is the **main tree**: dataflow, everything runs
+whenever its inputs change. Some things are sequences instead: "spin up the
+LiDAR, wait until it's ready, wait for the start button, then race", or "on
+the emergency switch: stop, wait until it's released, start over". Those are
+**flows**: nodes connected by thick white **exec** wires that run one after
+another, like Blender's or Unreal's execution wires.
+
+```
+On Start → Wait Until [LiDAR ready] → Wait Until [start button] → Start Main
+On Event [emergency switch or battery low] (priority 10)
+         → Log "stopped" → Wait Until [all clear] → Restart
+```
+
+- **On Start → … → Start Main** is the start-up flow. The main tree only
+  starts when it reaches Start Main. Without an On Start, the main tree
+  starts at once (like before flows existed).
+- **On Event** fires when its `Trigger` turns true, in any phase. It stops
+  the main tree (or the start-up flow, or a lower-priority event flow) and
+  runs its own flow, which ends at **Resume Main** (back to the main tree; an
+  interrupted start-up flow starts over), **Restart** (every node's
+  `reset()`, then the start-up flow again) or **Stop Program**.
+- In between: **Wait** (seconds), **Wait Until** (a bool), **Branch** (true /
+  false), **Log** (prints a message). An exec wire may lead back to an
+  earlier node (a loop), but give the loop a Wait.
+- **Which data nodes run when:** in the main phase all of them. During a flow
+  only those the flow needs: the ones feeding its nodes' inputs (and the ones
+  fed by its nodes' outputs). The nodes feeding On Event triggers always run,
+  so a battery monitor or emergency switch is watched all the time.
+- An exec output takes one wire; an exec input can take many. Wires that
+  don't lead to an end node end the flow there (the issues list warns).
+
+### `stop()` and `reset()`
+
+Two more functions a node can override:
+
+| Function | Runs |
+| --- | --- |
+| `stop()` | When the node stops running because an event flow stopped the main tree, and when the program ends (window closed, Esc, **Ctrl+C**, SIGTERM). Make the hardware safe here: a motor node sets its outputs to zero. May run more than once. |
+| `reset()` | Before a Restart runs the start-up flow again: forget state from the last run (counters, "already started" flags...). |
+
+With `stop()` in the motor node, "the robot stops" doesn't depend on any wiring.
+
+### Writing your own flow nodes
+
+A flow node has `"type": "exec"` sockets in its JSON and derives from
+`vl::FlowNode`. Exec sockets have no C++ member; exec outputs are numbered in
+JSON order.
+
+```json
+{
+    "id": "drive_until_wall", "class": "DriveUntilWall", "code": ["src/drive_until_wall.hpp"],
+    "inputs": [
+        { "id": "run", "name": "Run", "type": "exec" },
+        { "id": "distance", "name": "Distance", "type": "float32" }
+    ],
+    "outputs": [
+        { "id": "then", "name": "Then", "type": "exec" },
+        { "id": "speed", "name": "Speed", "type": "float32" }
+    ]
+}
+```
+
+```cpp
+class DriveUntilWall : public vl::FlowNode {
+public:
+    vl::Input<float> distance;
+    vl::Output<float> speed;
+
+    void start() override { speed.set(0.3f); }     // execution arrived here
+    int update() override {                        // after start(), then on every new input
+        if (distance.get() > 0.2f)
+            return Running;                        // stay here
+        speed.set(0);
+        return 0;                                  // continue on exec output 0 ("then")
+    }
+};
+```
+
+`update()` runs right after `start()` and then whenever an input changes, its
+timer fires (`runEvery()`, or `wakeAt(time)` for one wake-up) or it calls
+`requestProcess()`. Never block in it. `Running` means "not done yet".
+
+## 10. From graph to robot
 
 1. Build the graph in VL.
 2. **Compile** → pick the target **Linux ARM64**. The first build takes a few
@@ -576,7 +660,7 @@ sudo usermod -aG dialout,i2c,gpio,video $USER   # then log out and back in
 4. Test logic on your PC first: compile the same graph for **Linux x86-64**
    and run it from VL.
 
-## 10. When something goes wrong
+## 11. When something goes wrong
 
 | Problem | Cause |
 | --- | --- |

@@ -1,0 +1,10 @@
+{
+    "id": "t_any", "class": "TAny", "code": ["src/t_any.hpp"], "group": "Test",
+    "title": "Any", "description": "any = a or b or c; none = not any",
+    "inputs": [
+        { "id": "a", "type": "bool", "optional": true },
+        { "id": "b", "type": "bool", "optional": true },
+        { "id": "c", "type": "bool", "optional": true }
+    ],
+    "outputs": [ { "id": "any", "type": "bool" }, { "id": "none", "type": "bool" } ]
+}

@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <chrono>
+#include <climits>
 #include <cmath>
+#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -75,6 +77,10 @@ void Node::runEvery(double seconds) {
     vlInterval_ = seconds > 0 ? seconds : 0;
 }
 
+void Node::wakeAt(double time) {
+    vlWakeAt_ = time > 0 ? time : 1e-9;
+}
+
 void Node::requestProcess() {
     if (vlApp_)
         vlApp_->schedule(*this);
@@ -107,6 +113,7 @@ Node& App::create(const NodeType& type, const std::string& id) {
     ref.vlType_ = &type;
     ref.vlId_ = id;
     ref.vlTitle_ = type.title;
+    ref.vlFlow_ = dynamic_cast<FlowNode*>(&ref);
     for (const InputPort& port : type.inputs) {
         if (!port.optional)
             watch(ref, port.get(ref));
@@ -241,10 +248,16 @@ void App::schedule(Node& node) {
 void App::runTimers() {
     double now = vl::now();
     for (auto& node : nodes_) {
+        if (!runnable(*node))
+            continue;
         if (node->vlInterval_ > 0 && now >= node->vlNextRun_) {
             node->vlNextRun_ += node->vlInterval_;
             if (node->vlNextRun_ < now)  // Fell behind: don't try to catch up.
                 node->vlNextRun_ = now + node->vlInterval_;
+            schedule(*node);
+        }
+        if (node->vlWakeAt_ > 0 && now >= node->vlWakeAt_) {
+            node->vlWakeAt_ = 0;
             schedule(*node);
         }
     }
@@ -253,23 +266,228 @@ void App::runTimers() {
 void App::processQueue() {
     // Feedback wires never schedule a node, so this always ends; the limit is
     // only a safety net.
-    for (int i = 0; i < 100000 && !queue_.empty(); ++i) {
+    for (int i = 0; i < 100000 && !queue_.empty() && !quit_; ++i) {
         Node* node = queue_.front();
         queue_.pop_front();
         node->vlQueued_ = false;
+
+        FlowNode* flow = node->vlFlow_;
+        if (flow && !flow->vlEntry_) {
+            // Flow nodes only react while their flow is at them.
+            if (flow == flowAt_)
+                step(flow->update());
+            continue;
+        }
+        if (!(node->vlGroups_ & active_)) {
+            node->vlPending_ = true;  // Runs once its group is active again.
+            continue;
+        }
         if (node->vlReady())
             node->process();
+        if (requested_)
+            handleFlowRequest();
+    }
+    if (flowStarting_ && !quit_ && flowAt_) {
+        flowStarting_ = false;
+        flowAt_->start();
+        step(flowAt_->update());
+    } else if (stepPending_ && !quit_) {
+        stepPending_ = false;
+        step(pendingResult_);
     }
 }
 
 double App::nextTimer() const {
     double next = INFINITY;
     for (const auto& node : nodes_) {
+        if (!runnable(*node))
+            continue;
         if (node->vlInterval_ > 0)
             next = std::min(next, node->vlNextRun_);
+        if (node->vlWakeAt_ > 0)
+            next = std::min(next, node->vlWakeAt_);
     }
     return next;
 }
+
+// -- Flows ----------------------------------------------------------------------
+
+void App::connectExec(Node& from, int output, Node& to) {
+    from.vlFlow_ = dynamic_cast<FlowNode*>(&from);
+    to.vlFlow_ = dynamic_cast<FlowNode*>(&to);
+    if (!from.vlFlow_ || !to.vlFlow_ || output < 0) {
+        error("exec wires connect flow nodes (" + from.vlId_ + " -> " + to.vlId_ + ")");
+        return;
+    }
+    auto& exec = from.vlFlow_->vlExec_;
+    if (exec.size() <= static_cast<size_t>(output))
+        exec.resize(output + 1, nullptr);
+    exec[output] = &to;
+}
+
+void App::addFlowEntry(Node& entry, int group) {
+    entry.vlFlow_ = dynamic_cast<FlowNode*>(&entry);
+    if (!entry.vlFlow_ || group < 2 || group > 63) {
+        error("bad flow entry " + entry.vlId_);
+        return;
+    }
+    entry.vlFlow_->vlEntry_ = true;
+    entry.vlFlow_->vlGroup_ = group;
+    entry.vlGroups_ = GroupAlways;
+}
+
+void App::setGroups(Node& node, uint64_t groups) {
+    node.vlGroups_ = groups;
+}
+
+bool App::runnable(const Node& node) const {
+    if (node.vlFlow_ && !node.vlFlow_->vlEntry_)
+        return node.vlFlow_ == flowAt_;
+    return (node.vlGroups_ & active_) != 0;
+}
+
+void App::setActive(uint64_t groups) {
+    uint64_t old = active_;
+    active_ = groups;
+    double now = vl::now();
+    for (auto& node : nodes_) {
+        if (node->vlFlow_ && !node->vlFlow_->vlEntry_)
+            continue;
+        bool was = (node->vlGroups_ & old) != 0;
+        bool is = (node->vlGroups_ & groups) != 0;
+        if (was && !is) {
+            node->stop();
+        } else if (!was && is) {
+            // Back in action: timers start over, and anything it missed runs now.
+            if (node->vlInterval_ > 0) {
+                node->vlNextRun_ = now + node->vlInterval_;
+                node->vlPending_ = true;
+            }
+            if (node->vlPending_) {
+                node->vlPending_ = false;
+                schedule(*node);
+            }
+        }
+    }
+}
+
+void App::requestFlow(FlowNode& entry, int priority) {
+    if (!requested_ || priority > requestedPriority_) {
+        requested_ = &entry;
+        requestedPriority_ = priority;
+    }
+}
+
+void App::handleFlowRequest() {
+    FlowNode* entry = requested_;
+    requested_ = nullptr;
+    if (entry && !quit_)
+        startFlow(*entry, requestedPriority_);
+}
+
+void App::startFlow(FlowNode& entry, int priority) {
+    // A running flow only gives way to a higher priority (the start-up flow
+    // has the lowest).
+    if (flowEntry_ && priority <= flowPriority_)
+        return;
+    if (flowAt_)
+        flowAt_->stop();
+    flowEntry_ = &entry;
+    flowPriority_ = priority;
+    flowAt_ = &entry;
+    stepPending_ = false;
+    flowStarting_ = false;
+    setActive(GroupAlways | (uint64_t(1) << entry.vlGroup_));
+    // The flow's first step waits until the data nodes it needs have run
+    // (end of processQueue()), so it sees their current values.
+    flowStarting_ = true;
+}
+
+void App::step(int result) {
+    // Follow the flow until a node waits. Many steps without waiting (a loop
+    // in the flow) continue on the next pass, so the program stays responsive.
+    for (int guard = 0; guard < 10000; ++guard) {
+        if (!flowAt_ || quit_ || result == FlowNode::Running)
+            return;
+        if (result >= 0) {
+            const auto& exec = flowAt_->vlExec_;
+            Node* next = static_cast<size_t>(result) < exec.size() ? exec[result] : nullptr;
+            if (!next) {
+                endFlow();  // An exec output without a wire: the flow ends here.
+                return;
+            }
+            flowAt_ = next->vlFlow_;
+            flowAt_->vlWakeAt_ = 0;
+            flowAt_->start();
+            result = flowAt_->update();
+            continue;
+        }
+        switch (result) {
+        case FlowNode::StartMain: startMain(); return;
+        case FlowNode::ResumeMain: resumeMain(); return;
+        case FlowNode::Restart: restart(); return;
+        case FlowNode::StopProgram: quit(0); return;
+        default: endFlow(); return;
+        }
+    }
+    stepPending_ = true;
+    pendingResult_ = result;
+}
+
+void App::endFlow() {
+    // Nothing runs but what watches the events.
+    flowEntry_ = flowAt_ = nullptr;
+    setActive(GroupAlways);
+}
+
+void App::startMain() {
+    flowEntry_ = flowAt_ = nullptr;
+    mainStarted_ = true;
+    setActive(GroupAlways | GroupMain);
+}
+
+void App::resumeMain() {
+    // Back to the main tree if it was running; if the start-up flow was
+    // interrupted, it starts over.
+    if (mainStarted_ || !startEntry_)
+        startMain();
+    else
+        runStartUp();
+}
+
+void App::restart() {
+    flowEntry_ = flowAt_ = nullptr;
+    setActive(GroupAlways);
+    for (auto& node : nodes_)
+        node->reset();
+    mainStarted_ = false;
+    if (startEntry_)
+        runStartUp();
+    else
+        startMain();
+}
+
+void App::runStartUp() {
+    flowEntry_ = flowAt_ = nullptr;
+    startFlow(*startEntry_, INT_MIN);
+}
+
+void App::quit(int code) {
+    quit_ = true;
+    exitCode_ = code;
+}
+
+void App::stopAll() {
+    for (auto& node : nodes_)
+        node->stop();
+}
+
+// -- Running ----------------------------------------------------------------------
+
+namespace {
+volatile std::sig_atomic_t signalled = 0;
+extern "C" void onSignal(int) { signalled = 1; }
+}  // namespace
 
 int App::run() {
     if (errors_ > 0)
@@ -282,16 +500,27 @@ int App::run() {
     std::setvbuf(stdout, nullptr, _IOLBF, 0);
 #endif
 
-    for (auto& node : nodes_)
-        node->setup();
+    // Ctrl+C and SIGTERM end the program properly: every node's stop() runs.
+    std::signal(SIGINT, onSignal);
+    std::signal(SIGTERM, onSignal);
 
+    for (auto& node : nodes_) {
+        node->vlFlow_ = dynamic_cast<FlowNode*>(node.get());
+        if (node->vlFlow_ && node->vlFlow_->vlEntry_ && node->vlFlow_->isStartEntry() && !startEntry_)
+            startEntry_ = node->vlFlow_;
+    }
     // Fast mode: simulated time, from an arbitrary start (not 0, which nodes
-    // may use for "not yet").
+    // may use for "not yet"). Started before setup(), so nodes can use the
+    // clock there.
     const bool fast = envFlag("VL_FAST");
     if (fast)
         fastClock = 1000.0;
 
+    for (auto& node : nodes_)
+        node->setup();
+
     // Every node gets one chance to run at the start (sources, constants...).
+    // Nodes whose group isn't active get it once it is.
     double now = vl::now();
     for (auto& node : nodes_) {
         if (node->vlInterval_ > 0)
@@ -299,21 +528,38 @@ int App::run() {
         schedule(*node);
     }
 
+    // With an On Start, the start-up flow runs first and the main tree waits.
+    if (startEntry_) {
+        active_ = GroupAlways;
+        runStartUp();
+    } else {
+        active_ = GroupAlways | GroupMain;
+        mainStarted_ = true;
+    }
+
+    int code = 0;
 #ifdef VL_GUI
     if (gui_ && !fast)
-        return runGui();
+        code = runGui();
+    else
 #endif
-    return runHeadless();
+        code = runHeadless();
+    stopAll();
+    return quit_ ? exitCode_ : code;
 }
 
 int App::runHeadless() {
     const char* stopAfter = std::getenv("VL_STOP_AFTER");
     const double stopAt = stopAfter && *stopAfter ? vl::now() + std::atof(stopAfter) : INFINITY;
     for (;;) {
+        if (signalled || quit_)
+            return 0;
         processQueue();
         runTimers();
-        if (!queue_.empty())
+        if (!queue_.empty() || stepPending_ || flowStarting_)
             continue;
+        if (quit_)
+            return 0;
 
         double next = nextTimer();
         if (std::isinf(next))
@@ -324,7 +570,8 @@ int App::runHeadless() {
             fastClock = std::max(fastClock, next);  // Jump straight there.
             continue;
         }
-        double wait = next - realNow();
+        // Sleep until the next timer, waking now and then to notice Ctrl+C.
+        double wait = std::min(next - realNow(), 0.1);
         if (wait > 0)
             std::this_thread::sleep_for(std::chrono::duration<double>(wait));
     }
@@ -360,7 +607,9 @@ int App::runGui() {
     ImGui_ImplSDLRenderer2_Init(renderer);
 
     bool running = true;
-    while (running) {
+    while (running && !quit_) {
+        if (signalled)
+            running = false;
         SDL_Event event;
         while (SDL_PollEvent(&event)) {
             ImGui_ImplSDL2_ProcessEvent(&event);

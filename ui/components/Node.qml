@@ -149,10 +149,12 @@ Rectangle {
 			x: row.dotCenterX - width / 2
 			anchors.verticalCenter: parent.verticalCenter
 			// Optional inputs are diamonds: the node runs without them.
+			// Exec sockets (flows) are rounded squares.
 			readonly property bool diamond: row.kind === "input" && row.modelData.optional === true
+			readonly property bool exec: row.modelData.type === "exec"
 			width: diamond ? Math.round(row.dotSize * 0.8) : row.dotSize
 			height: width
-			radius: diamond ? 2 : width / 2
+			radius: diamond || exec ? 2 : width / 2
 			rotation: diamond ? 45 : 0
 			scale: hitArea.containsMouse || hitArea.pressed ? 1.3 : 1.0
 			// Outputs are always filled; inputs are hollow until connected.
@@ -187,7 +189,7 @@ Rectangle {
 			}
 
 			Text {
-				visible: !row.showsWidget
+				visible: !row.showsWidget && row.modelData.type !== "exec"
 				text: row.modelData.type
 				color: row.typeColor
 				font.pixelSize: 9

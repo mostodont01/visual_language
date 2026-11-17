@@ -1,0 +1,9 @@
+{
+    "id": "t_signal", "class": "TSignal", "code": ["src/t_signal.hpp"], "group": "Test",
+    "title": "Signal", "description": "false, true from on_at seconds, false again from off_at (if >= 0)",
+    "settings": [
+        { "id": "on_at", "type": "float32", "widget": { "kind": "number", "default": 1 } },
+        { "id": "off_at", "type": "float32", "widget": { "kind": "number", "default": -1 } }
+    ],
+    "outputs": [ { "id": "high", "type": "bool" }, { "id": "low", "type": "bool" } ]
+}

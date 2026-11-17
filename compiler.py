@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from node_catalog import NodeDef, NodePackage, is_integer_type
+from node_catalog import EXEC_TYPE, NodeDef, NodePackage, is_integer_type
 
 # Choices offered in the Compile popup: (id, label). The first one is the default.
 LANGUAGES = [
@@ -227,6 +227,116 @@ def plan_wires(nodes: list[dict], connections: list[dict], catalog) -> WirePlan:
 
 
 # ---------------------------------------------------------------------------
+# Flows
+# ---------------------------------------------------------------------------
+
+MAX_FLOWS = 60   # Group bits: 0 = main tree, 1 = always, 2.. = one per flow.
+GROUP_MAIN = 1 << 0
+GROUP_ALWAYS = 1 << 1
+
+
+@dataclass
+class FlowPlan:
+    """Which nodes run when (see runtime/vl/flow.hpp)."""
+    entries: list[str]               # entry node ids (no exec input), in graph order
+    groups: dict[str, int]           # node id -> group bits (data nodes and entries)
+    exec_wires: list[tuple[str, int, str]]   # (source node, exec output number, target node)
+    errors: list[str]
+
+    @property
+    def has_flows(self) -> bool:
+        return bool(self.entries)
+
+
+def plan_flows(nodes: list[dict], connections: list[dict], catalog) -> FlowPlan:
+    by_id = {n["id"]: n for n in nodes}
+    defs = {n["id"]: catalog[n["type"]] for n in nodes}
+    flow_ids = {nid for nid, d in defs.items() if d.is_flow}
+    errors: list[str] = []
+
+    exec_out: dict[str, list[str]] = {}       # node -> its exec output ids in order
+    for nid in flow_ids:
+        exec_out[nid] = [s.id for s in defs[nid].outputs if s.type == EXEC_TYPE]
+
+    exec_next: dict[str, set[str]] = {nid: set() for nid in flow_ids}
+    exec_wires = []
+    data_in: dict[str, list[str]] = {nid: [] for nid in by_id}    # node -> data sources
+    data_out: dict[str, list[str]] = {nid: [] for nid in by_id}   # node -> data targets
+    for c in connections:
+        sn, tn = c["source_node"], c["target_node"]
+        if sn not in by_id or tn not in by_id:
+            continue
+        sock = next((s for s in defs[sn].outputs if s.id == c["source_socket"]), None)
+        if sock is not None and sock.type == EXEC_TYPE:
+            exec_next[sn].add(tn)
+            exec_wires.append((sn, exec_out[sn].index(sock.id), tn))
+        else:
+            data_in[tn].append(sn)
+            data_out[sn].append(tn)
+
+    entries = [n["id"] for n in nodes if n["id"] in flow_ids
+               and not any(s.type == EXEC_TYPE for s in defs[n["id"]].inputs)]
+    if len(entries) > MAX_FLOWS:
+        errors.append(f"At most {MAX_FLOWS} flows (On Start / On Event nodes) are supported.")
+        entries = entries[:MAX_FLOWS]
+
+    groups: dict[str, int] = {nid: GROUP_MAIN for nid in by_id if nid not in flow_ids}
+
+    def upstream(starts):
+        seen, todo = set(), list(starts)
+        while todo:
+            nid = todo.pop()
+            if nid in seen or nid in flow_ids:
+                continue
+            seen.add(nid)
+            todo.extend(data_in[nid])
+        return seen
+
+    def downstream(starts):
+        seen, todo = set(), list(starts)
+        while todo:
+            nid = todo.pop()
+            if nid in seen or nid in flow_ids:
+                continue
+            seen.add(nid)
+            todo.extend(data_out[nid])
+        return seen
+
+    for k, entry in enumerate(entries):
+        bit = 1 << (2 + k)
+        members, todo = set(), [entry]
+        while todo:
+            nid = todo.pop()
+            if nid in members:
+                continue
+            members.add(nid)
+            todo.extend(exec_next[nid])
+        # (The entry's own inputs are watched in every phase, see below.)
+        sources = [src for m in members if m != entry for src in data_in[m]]
+        targets = [t for m in members for t in data_out[m]]
+        for nid in upstream(sources) | downstream(targets):
+            groups[nid] |= bit
+        # Entry nodes run as data nodes in every phase (they watch triggers),
+        # and so does everything feeding them.
+        groups[entry] = GROUP_ALWAYS
+        for nid in upstream(data_in[entry]):
+            groups[nid] |= GROUP_ALWAYS
+
+    return FlowPlan(entries, groups, exec_wires, errors)
+
+
+def split_exec_wires(connections: list[dict], nodes: list[dict], catalog) -> tuple[list[dict], list[dict]]:
+    """(data wires, exec wires)."""
+    by_id = {n["id"]: n for n in nodes}
+    data, exec_ = [], []
+    for c in connections:
+        node = by_id.get(c["source_node"])
+        sock = next((s for s in catalog[node["type"]].outputs if s.id == c["source_socket"]), None) if node else None
+        (exec_ if sock is not None and sock.type == EXEC_TYPE else data).append(c)
+    return data, exec_
+
+
+# ---------------------------------------------------------------------------
 # Code generation
 # ---------------------------------------------------------------------------
 
@@ -297,9 +407,15 @@ def generate_project(
     for type_id in used_types:
         node_def = catalog[type_id]
         for s in node_def.inputs + node_def.outputs + node_def.settings:
-            if cpp_type(s.type) is None:
+            if s.type != EXEC_TYPE and cpp_type(s.type) is None:
                 errors.append(f"Type '{s.type}' (used by '{node_def.title}') has no C++ definition. "
                               "Declare it in a node's \"types\".")
+
+    flows = plan_flows(nodes, connections, catalog)
+    errors += flows.errors
+    starts = [n for n in nodes if n["type"] == "flow_on_start"]
+    if len(starts) > 1:
+        errors.append("A program can only have one On Start.")
 
     # Only clean folders VL wrote itself.
     if output_dir.exists() and any(output_dir.iterdir()) and not (output_dir / MARKER_FILE).exists():
@@ -345,10 +461,11 @@ def generate_project(
         files[f"generated/{_type_file(type_id)}"] = _node_type_cpp(
             type_id, catalog, type_owner).encode("utf-8")
 
-    plan = plan_wires(nodes, connections, catalog)
-    files["generated/main.cpp"] = _main_cpp(nodes, connections, plan, gui).encode("utf-8")
+    data_wires, _ = split_exec_wires(connections, nodes, catalog)
+    plan = plan_wires(nodes, data_wires, catalog)
+    files["generated/main.cpp"] = _main_cpp(nodes, data_wires, plan, gui, flows).encode("utf-8")
     files[values_file_name(name)] = (json.dumps(
-        _values(nodes, connections, plan, catalog, settings, name), indent=1, ensure_ascii=False)
+        _values(nodes, data_wires, plan, catalog, settings, name), indent=1, ensure_ascii=False)
         + "\n").encode("utf-8")
 
     cpp_files = sorted(
@@ -366,11 +483,14 @@ def generate_project(
         return GenerateResult(False, [f"Could not write the project to {output_dir}: {e.strerror}"])
 
     feedback = len(plan.feedback)
+    if flows.has_flows:
+        count = len(flows.entries)
     messages = [
         f"Generated C++ project in {output_dir}"
         + (f" ({changed} file{'s' if changed != 1 else ''} changed)" if changed else " (nothing changed)"),
         f"{len(nodes)} nodes, {len(connections)} wires"
         + (f" ({feedback} feedback)" if feedback else "")
+        + (f", {count} flow{'s' if count != 1 else ''}" if flows.has_flows else "")
         + (", with app widgets" if gui else ", no window (no visible app widgets)"),
     ]
     return GenerateResult(True, messages, gui)
@@ -456,7 +576,7 @@ def _node_type_cpp(type_id: str, catalog, type_owner: dict[str, str]) -> str:
     includes = []
     # Custom types this node uses but another node defines.
     for s in node_def.inputs + node_def.outputs + node_def.settings:
-        owner = type_owner.get(s.type)
+        owner = type_owner.get(s.type) if s.type != EXEC_TYPE else None
         if owner and owner != type_id:
             include = f"nodes/{owner}/{catalog[owner].types[s.type].header}"
             if include not in includes:
@@ -478,10 +598,10 @@ def _node_type_cpp(type_id: str, catalog, type_owner: dict[str, str]) -> str:
         f"        t.title = {_cpp_string(node_def.title)};",
         "        t.create = [] { return std::unique_ptr<vl::Node>(new N()); };",
     ]
-    for s in node_def.inputs:
+    for s in (s for s in node_def.inputs if s.type != EXEC_TYPE):
         out.append(f"        t.inputs.push_back(vl::inputPort({_cpp_string(s.id)}, {_cpp_string(s.type)}, "
                    f"{'true' if s.optional else 'false'}, &N::{s.id}));")
-    for s in node_def.outputs:
+    for s in (s for s in node_def.outputs if s.type != EXEC_TYPE):
         out.append(f"        t.outputs.push_back(vl::outputPort({_cpp_string(s.id)}, {_cpp_string(s.type)}, "
                    f"&N::{s.id}));")
     for s in node_def.settings:
@@ -498,7 +618,7 @@ def _node_type_cpp(type_id: str, catalog, type_owner: dict[str, str]) -> str:
     return "\n".join(out)
 
 
-def _main_cpp(nodes, connections, plan: WirePlan, gui: bool) -> str:
+def _main_cpp(nodes, connections, plan: WirePlan, gui: bool, flows: FlowPlan) -> str:
     """generated/main.cpp: creates the nodes and wires them. Only depends on
     which nodes there are and how they are wired, not on any value."""
     used_types = sorted({n["type"] for n in nodes})
@@ -524,6 +644,17 @@ def _main_cpp(nodes, connections, plan: WirePlan, gui: bool) -> str:
         out.append(f"    app.connect({var[c['source_node']]}, {_cpp_string(c['source_socket'])}, "
                    f"{var[c['target_node']]}, {_cpp_string(c['target_socket'])}, "
                    f"{'true' if plan.triggers(i) else 'false'});")
+    if flows.has_flows:
+        out += ["", "    // Flows: exec wires, entries (On Start / On Event) and which data nodes",
+                "    // run during which flow (group bits: 1 main tree, 2 always, 4.. one per flow)"]
+        for source, index, target in flows.exec_wires:
+            out.append(f"    app.connectExec({var[source]}, {index}, {var[target]});")
+        for k, entry in enumerate(flows.entries):
+            out.append(f"    app.addFlowEntry({var[entry]}, {2 + k});")
+        for n in nodes:
+            groups = flows.groups.get(n["id"])
+            if groups is not None and groups != GROUP_MAIN and n["id"] not in flows.entries:
+                out.append(f"    app.setGroups({var[n['id']]}, {groups:#x});")
     out += [
         "",
         "    if (!app.loadValues(argc, argv))",

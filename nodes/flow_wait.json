@@ -1,0 +1,12 @@
+{
+    "id": "flow_wait",
+    "class": "vl::Wait",
+    "group": "Flow",
+    "title": "Wait",
+    "description": "Waits a number of seconds",
+    "inputs": [
+        { "id": "run", "name": "Run", "type": "exec" },
+        { "id": "seconds", "name": "Seconds", "type": "float32", "widget": { "kind": "number", "default": 1, "min": 0 } }
+    ],
+    "outputs": [ { "id": "then", "name": "Then", "type": "exec" } ]
+}
