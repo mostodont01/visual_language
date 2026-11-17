@@ -227,7 +227,9 @@ More rules:
 
 Bigger nodes: declare the class in the `.hpp`, write the functions in a `.cpp`.
 List **both** files in `code`. Only `.cpp`, `.cc` and `.cxx` files are compiled.
-Headers are included by the generated program.
+Headers are included by the generated program: each node type is compiled
+in its own file that includes only that node's headers, so a header must
+`#include` everything it uses.
 
 ```cpp
 // src/set_motor_speed.hpp
@@ -560,9 +562,13 @@ sudo usermod -aG dialout,i2c,gpio,video $USER   # then log out and back in
 3. Copy it to the robot and run it:
 
    ```bash
-   scp build/robot pi@<robot-ip>:~/
+   scp build/robot build/robot.values.json pi@<robot-ip>:~/
    ssh pi@<robot-ip> ./robot
    ```
+
+   `robot.values.json` holds the settings and input values; the program
+   needs it next to it. Changing only values doesn't need a new program:
+   compile again and copy just the `.values.json`.
 
    With the Pi's desktop running, it opens fullscreen. On Raspberry Pi OS
    Lite (no desktop) it draws straight to the screen and needs

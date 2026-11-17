@@ -5,8 +5,22 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
+#include <sstream>
 #include <string>
 #include <thread>
+
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
 
 #ifdef VL_GUI
 #define SDL_MAIN_HANDLED  // main() is ours (generated/main.cpp), not SDL's.
@@ -31,6 +45,22 @@ double fastClock = -1;
 bool envFlag(const char* name) {
     const char* value = std::getenv(name);
     return value && *value && std::string(value) != "0";
+}
+
+// The running program's file, or argv[0] if the system can't tell.
+std::string programPath(const char* argv0) {
+#ifdef _WIN32
+    char buffer[MAX_PATH * 4];
+    DWORD n = GetModuleFileNameA(nullptr, buffer, sizeof buffer);
+    if (n > 0 && n < sizeof buffer)
+        return std::string(buffer, n);
+#else
+    char buffer[4096];
+    ssize_t n = readlink("/proc/self/exe", buffer, sizeof buffer);
+    if (n > 0 && n < static_cast<ssize_t>(sizeof buffer))
+        return std::string(buffer, static_cast<size_t>(n));
+#endif
+    return argv0 ? argv0 : "";
 }
 
 }  // namespace
@@ -60,8 +90,136 @@ bool Node::vlReady() const {
 
 // -- App ----------------------------------------------------------------------
 
+App::App(bool gui) : name_("VL"), fullscreen_(true), gui_(gui) {}
+
 App::App(std::string name, bool fullscreen, bool gui)
     : name_(std::move(name)), fullscreen_(fullscreen), gui_(gui) {}
+
+void App::error(const std::string& message) {
+    std::fprintf(stderr, "vl: %s\n", message.c_str());
+    ++errors_;
+}
+
+Node& App::create(const NodeType& type, const std::string& id) {
+    std::unique_ptr<Node> node = type.create();
+    Node& ref = *node;
+    ref.vlApp_ = this;
+    ref.vlType_ = &type;
+    ref.vlId_ = id;
+    ref.vlTitle_ = type.title;
+    for (const InputPort& port : type.inputs) {
+        if (!port.optional)
+            watch(ref, port.get(ref));
+    }
+    if (type.hasWidget)
+        setWidget(ref, true, type.title);
+    nodes_.push_back(std::move(node));
+    return ref;
+}
+
+void App::connect(Node& from, const std::string& output, Node& to, const std::string& input, bool triggers) {
+    if (!from.vlType_ || !to.vlType_) {
+        error("connect() needs nodes made by create()");
+        return;
+    }
+    const OutputPort* out = nullptr;
+    for (const OutputPort& port : from.vlType_->outputs)
+        if (port.id == output)
+            out = &port;
+    const InputPort* in = nullptr;
+    for (const InputPort& port : to.vlType_->inputs)
+        if (port.id == input)
+            in = &port;
+    if (!out || !in) {
+        error("no socket " + (out ? to.vlId_ + "." + input : from.vlId_ + "." + output)
+              + " (the program is older than its node code? compile again)");
+        return;
+    }
+    if (out->cppType != in->cppType) {
+        error("can't connect " + from.vlId_ + "." + output + " (" + out->type + ") to " + to.vlId_ + "."
+              + input + " (" + in->type + "): different C++ types");
+        return;
+    }
+    out->connect(from, to, in->get(to), triggers);
+}
+
+bool App::loadValues(int argc, char** argv) {
+    const char* override = std::getenv("VL_VALUES");
+    if (override && *override)
+        return loadValuesFrom(override);
+    std::string path = programPath(argc > 0 ? argv[0] : nullptr);
+    if (path.size() > 4 && (path.compare(path.size() - 4, 4, ".exe") == 0
+                            || path.compare(path.size() - 4, 4, ".EXE") == 0))
+        path.resize(path.size() - 4);
+    return loadValuesFrom(path + ".values.json");
+}
+
+bool App::loadValuesFrom(const std::string& path) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+        std::fprintf(stderr, "vl: can't read the values file %s. It is written by VL next to the "
+                             "program; copy it along with the program (or set VL_VALUES).\n", path.c_str());
+        return false;
+    }
+    std::stringstream text;
+    text << file.rdbuf();
+    json::Value root;
+    try {
+        root = json::parse(text.str());
+    } catch (const json::ParseError& e) {
+        std::fprintf(stderr, "vl: %s: %s\n", path.c_str(), e.what());
+        return false;
+    }
+
+    const json::Value& app = root["app"];
+    if (app["name"].isString())
+        name_ = app["name"].asString();
+    if (app["fullscreen"].isBool())
+        fullscreen_ = app["fullscreen"].asBool();
+
+    const json::Value& entries = root["nodes"];
+    for (auto& node : nodes_) {
+        const NodeType* type = node->vlType_;
+        const json::Value& entry = entries[node->vlId_];
+        if (!type || !entry.isObject())
+            continue;
+        for (const auto& [key, value] : entry["settings"].members()) {
+            bool found = false;
+            for (const SettingPort& port : type->settings) {
+                if (port.id == key) {
+                    port.set(*node, value);
+                    found = true;
+                }
+            }
+            if (!found)
+                std::fprintf(stderr, "vl: %s: %s has no setting '%s' (ignored)\n", path.c_str(),
+                             node->vlId_.c_str(), key.c_str());
+        }
+        for (const auto& [key, start] : entry["inputs"].members()) {
+            bool found = false;
+            for (const InputPort& port : type->inputs) {
+                if (port.id != key)
+                    continue;
+                found = true;
+                if (start.has("receive"))
+                    port.start(*node, start["receive"], true);
+                else if (start.has("init"))
+                    port.start(*node, start["init"], false);
+            }
+            if (!found)
+                std::fprintf(stderr, "vl: %s: %s has no input '%s' (ignored)\n", path.c_str(),
+                             node->vlId_.c_str(), key.c_str());
+        }
+        const json::Value& widget = entry["widget"];
+        if (widget.isObject() && node->vlHasWidget_) {
+            if (widget["visible"].isBool())
+                node->vlWidgetVisible_ = widget["visible"].asBool();
+            if (widget["title"].isString())
+                node->vlWidgetTitle_ = widget["title"].asString();
+        }
+    }
+    return true;
+}
 
 void App::watch(Node& node, const InputBase& input) {
     node.vlInputs_.push_back(&input);
@@ -114,6 +272,9 @@ double App::nextTimer() const {
 }
 
 int App::run() {
+    if (errors_ > 0)
+        return 1;
+
     // Show prints from nodes right away, also when piped into a log.
 #ifdef _WIN32
     std::setvbuf(stdout, nullptr, _IONBF, 0);  // Windows has no line buffering.

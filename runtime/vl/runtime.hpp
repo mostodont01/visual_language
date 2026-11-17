@@ -7,8 +7,17 @@
 //     outputs   vl::Output<T>    write with set(value)
 //     settings  plain members    (assigned before setup())
 //
-// The generated main() creates the nodes, assigns their values, connects
-// outputs to inputs and runs vl::App.
+// The generated program is split so that small changes rebuild little:
+//   generated/node_<type>.cpp  one per node type: describes the type (how to
+//                              create it, its sockets and settings) as a
+//                              vl::NodeType. Only this file includes the
+//                              node's headers.
+//   generated/main.cpp         creates the nodes and connects the wires, by
+//                              socket id. Depends only on the graph's shape.
+//   <program>.values.json      settings, initial input values and widget
+//                              options, read at start-up (next to the
+//                              program, or the file in VL_VALUES). Changing a
+//                              value needs no compiling at all.
 //
 // When a node runs: whenever one of its inputs receives a new value, using
 // the latest value of every other input, and only once every required input
@@ -21,16 +30,23 @@
 //     update the stored value, so loops can't run forever.
 #pragma once
 
+#include <cmath>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <string>
+#include <type_traits>
+#include <typeindex>
 #include <vector>
+
+#include "vl/json.hpp"
 
 namespace vl {
 
 class App;
 class Node;
+struct NodeType;
 
 // The program's clock, in seconds (only differences mean anything). Normally
 // real time. In fast mode (environment variable VL_FAST=1, headless only) it
@@ -104,6 +120,7 @@ private:
     bool vlReady() const;
 
     App* vlApp_ = nullptr;
+    const NodeType* vlType_ = nullptr;  // Set for nodes made by App::create().
     std::string vlId_;
     std::string vlTitle_;
     std::vector<const InputBase*> vlInputs_;
@@ -147,10 +164,105 @@ private:
     std::vector<Link> links_;
 };
 
+// -- Node types ---------------------------------------------------------------
+// A node type described for the runtime, so nodes can be created and wired by
+// id without the code that does it knowing the node's class. Written by the
+// generated generated/node_<type>.cpp files.
+
+// A value from the values file as T: numbers, bool and std::string directly,
+// other types from a string if they can be made from one; null gives T{}.
+template <typename T>
+T fromValue(const json::Value& v) {
+    if (v.isNull())
+        return T{};
+    if constexpr (std::is_same_v<T, bool>) {
+        return v.asBool();
+    } else if constexpr (std::is_integral_v<T>) {
+        return static_cast<T>(std::llround(v.asNumber()));
+    } else if constexpr (std::is_floating_point_v<T>) {
+        return static_cast<T>(v.asNumber());
+    } else if constexpr (std::is_constructible_v<T, std::string>) {
+        return T(v.asString());
+    } else {
+        return T{};
+    }
+}
+
+struct InputPort {
+    std::string id;
+    std::string type;           // VL type name (for messages)
+    std::type_index cppType;    // must match the output it's connected to
+    bool optional;
+    std::function<InputBase&(Node&)> get;
+    // Give the input its starting value: receive (counts as a value) or init.
+    std::function<void(Node&, const json::Value&, bool receive)> start;
+};
+
+struct OutputPort {
+    std::string id;
+    std::string type;
+    std::type_index cppType;
+    // Connect this output of `from` to `input` (of the same C++ type) of `to`.
+    std::function<void(Node& from, Node& to, InputBase& input, bool triggers)> connect;
+};
+
+struct SettingPort {
+    std::string id;
+    std::function<void(Node&, const json::Value&)> set;
+};
+
+struct NodeType {
+    std::string id;
+    std::string title;
+    std::function<std::unique_ptr<Node>()> create;
+    std::vector<InputPort> inputs;
+    std::vector<OutputPort> outputs;
+    std::vector<SettingPort> settings;
+    bool hasWidget = false;
+};
+
+template <typename N, typename T>
+InputPort inputPort(const char* id, const char* type, bool optional, Input<T> N::*member) {
+    return {id, type, std::type_index(typeid(T)), optional,
+            [member](Node& n) -> InputBase& { return static_cast<N&>(n).*member; },
+            [member](Node& n, const json::Value& v, bool receive) {
+                Input<T>& input = static_cast<N&>(n).*member;
+                if (receive)
+                    input.receive(fromValue<T>(v));
+                else
+                    input.init(fromValue<T>(v));
+            }};
+}
+
+template <typename N, typename T>
+OutputPort outputPort(const char* id, const char* type, Output<T> N::*member) {
+    return {id, type, std::type_index(typeid(T)),
+            [member](Node& from, Node& to, InputBase& input, bool triggers) {
+                (static_cast<N&>(from).*member).connect(static_cast<Input<T>&>(input), to, triggers);
+            }};
+}
+
+template <typename N, typename T>
+SettingPort settingPort(const char* id, T N::*member) {
+    return {id, [member](Node& n, const json::Value& v) { static_cast<N&>(n).*member = fromValue<T>(v); }};
+}
+
 class App {
 public:
-    // gui: open a window for app widgets (only built with VL_GUI).
+    // gui: open a window for app widgets (only built with VL_GUI). The name
+    // and fullscreen flag come from the values file (loadValues()).
+    explicit App(bool gui);
     App(std::string name, bool fullscreen, bool gui);
+
+    // Create a node of a described type. Its required inputs are watched.
+    Node& create(const NodeType& type, const std::string& id);
+    // Wire an output to an input by socket id. Problems are reported by run().
+    void connect(Node& from, const std::string& output, Node& to, const std::string& input, bool triggers);
+    // Read the values file and apply it to the nodes made by create(): the
+    // file in the environment variable VL_VALUES, else <program>.values.json
+    // next to the program. Returns false (after printing why) if it can't.
+    bool loadValues(int argc, char** argv);
+    bool loadValuesFrom(const std::string& path);
 
     template <typename N>
     N& add(const std::string& id, const std::string& title) {
@@ -182,9 +294,12 @@ private:
     void drawWidgets(float width, float height);
 #endif
 
+    void error(const std::string& message);
+
     std::string name_;
     bool fullscreen_;
     bool gui_;
+    int errors_ = 0;
     std::vector<std::unique_ptr<Node>> nodes_;
     std::deque<Node*> queue_;
 };

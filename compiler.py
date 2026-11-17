@@ -4,16 +4,24 @@ generate_project() writes a self-contained CMake project into the output
 folder:
 
     CMakeLists.txt
-    cmake/                  toolchain files for cross-compiling
-    runtime/vl/             the VL runtime (copied from this repo)
-    nodes/<type id>/...     the code of every node type used in the graph
-    generated/main.cpp      creates the nodes, sets values, connects wires
+    runtime/vl/                 the VL runtime (copied from this repo)
+    runtime/cmake/              toolchain files for cross-compiling
+    nodes/<type id>/...         the code of every node type used in the graph
+    generated/node_<type>.cpp   one per node type: describes it for the runtime
+    generated/main.cpp          creates the nodes and connects the wires
+    <program>.values.json       settings and input values, read at start-up
+
+The folder is kept between compiles and only files whose content changed
+are rewritten, so the build (in build/ inside it) only recompiles what
+changed: a value change compiles nothing, a node's code recompiles that
+node's files, a new wire only main.cpp.
 
 builder.py then runs CMake on it. The execution model is described in
 runtime/vl/runtime.hpp.
 """
 
 import json
+import os
 import platform
 import shutil
 from dataclasses import dataclass
@@ -229,23 +237,9 @@ class GenerateResult:
     gui: bool = False
 
 
-def _cpp_identifier(node_id: str) -> str:
-    return "n_" + "".join(c if c.isalnum() else "_" for c in node_id)
-
-
 def _cpp_string(text: str) -> str:
     # JSON string escapes (\", \\, \n, \uXXXX) are valid in C++ literals too.
     return json.dumps(text, ensure_ascii=False)
-
-
-def _cpp_literal(value: Any, data_type: str, cpp_type: str) -> str:
-    if data_type == "bool" or isinstance(value, bool):
-        return "true" if value else "false"
-    if data_type == "string" or isinstance(value, str):
-        return f"std::string({_cpp_string(str(value))})"
-    if is_integer_type(data_type):
-        return f"{cpp_type}({int(value)})"
-    return f"{cpp_type}({float(value)!r})"
 
 
 def generate_project(
@@ -316,49 +310,65 @@ def generate_project(
         return GenerateResult(False, errors)
 
     gui = any(catalog[n["type"]].app_widget is not None and n.get("widget_visible", True) for n in nodes)
+    target = cmake_target_name(name)
 
-    # -- Write files
+    # Function names of the node type descriptions must not collide.
+    functions: dict[str, str] = {}
+    for type_id in used_types:
+        fn = _type_function(type_id)
+        if fn in functions:
+            return GenerateResult(False, [f"Node types '{functions[fn]}' and '{type_id}' are too similar "
+                                          "(their ids only differ in punctuation)."])
+        functions[fn] = type_id
+
+    # -- Write files (only those whose content changed, so the build only
+    # recompiles what's needed) and remove the ones from earlier compiles
+    # that aren't used any more.
+    files: dict[str, bytes] = {}
+    for path in sorted(RUNTIME_DIR.rglob("*")):
+        if path.is_file() and "__pycache__" not in path.parts:
+            files["runtime/" + path.relative_to(RUNTIME_DIR).as_posix()] = path.read_bytes()
+
+    for type_id in used_types:
+        # Header file -> custom type it defines, for this node.
+        type_headers = {t.header: name for name, t in catalog[type_id].types.items()
+                        if name not in BUILTIN_CPP_TYPES}
+        for rel, content in packages[type_id].files.items():
+            type_name = type_headers.get(rel)
+            if type_name:
+                # Several nodes may ship the same type header; a guard named
+                # after the type makes it count only once.
+                macro = "VL_TYPE_" + "".join(c if c.isalnum() else "_" for c in type_name)
+                content = (f"#ifndef {macro}\n#define {macro}\n".encode()
+                           + content + f"\n#endif  // {macro}\n".encode())
+            files[f"nodes/{type_id}/{rel}"] = content
+        files[f"generated/{_type_file(type_id)}"] = _node_type_cpp(
+            type_id, catalog, type_owner).encode("utf-8")
+
+    plan = plan_wires(nodes, connections, catalog)
+    files["generated/main.cpp"] = _main_cpp(nodes, connections, plan, gui).encode("utf-8")
+    files[values_file_name(name)] = (json.dumps(
+        _values(nodes, connections, plan, catalog, settings, name), indent=1, ensure_ascii=False)
+        + "\n").encode("utf-8")
+
+    cpp_files = sorted(
+        f"nodes/{type_id}/{rel}"
+        for type_id in used_types
+        for rel in packages[type_id].files
+        if rel.endswith((".cpp", ".cc", ".cxx"))
+    )
+    type_files = [f"generated/{_type_file(t)}" for t in used_types]
+    files["CMakeLists.txt"] = _cmake_lists(target, type_files + cpp_files, gui).encode("utf-8")
+
     try:
-        output_dir.mkdir(parents=True, exist_ok=True)
-        for sub in ("runtime", "nodes", "generated", "cmake"):  # "cmake" is from older VL versions
-            shutil.rmtree(output_dir / sub, ignore_errors=True)
-        (output_dir / MARKER_FILE).write_text("Written by VL. This folder is regenerated on every compile.\n",
-                                              encoding="utf-8")
-        shutil.copytree(RUNTIME_DIR, output_dir / "runtime")
-
-        for type_id in used_types:
-            # Header file -> custom type it defines, for this node.
-            type_headers = {t.header: name for name, t in catalog[type_id].types.items()
-                            if name not in BUILTIN_CPP_TYPES}
-            for rel, content in packages[type_id].files.items():
-                path = output_dir / "nodes" / type_id / rel
-                path.parent.mkdir(parents=True, exist_ok=True)
-                type_name = type_headers.get(rel)
-                if type_name:
-                    # Several nodes may ship the same type header; a guard named
-                    # after the type makes it count only once.
-                    macro = "VL_TYPE_" + "".join(c if c.isalnum() else "_" for c in type_name)
-                    content = (f"#ifndef {macro}\n#define {macro}\n".encode()
-                               + content + f"\n#endif  // {macro}\n".encode())
-                path.write_bytes(content)
-
-        (output_dir / "generated").mkdir()
-        (output_dir / "generated" / "main.cpp").write_text(
-            _main_cpp(nodes, connections, catalog, cpp_type, settings, name, gui), encoding="utf-8")
-
-        cpp_files = sorted(
-            f"nodes/{type_id}/{rel}"
-            for type_id in used_types
-            for rel in packages[type_id].files
-            if rel.endswith((".cpp", ".cc", ".cxx"))
-        )
-        (output_dir / "CMakeLists.txt").write_text(_cmake_lists(name, cpp_files, gui), encoding="utf-8")
+        changed = _write_tree(output_dir, files)
     except OSError as e:
         return GenerateResult(False, [f"Could not write the project to {output_dir}: {e.strerror}"])
 
-    feedback = len(plan_wires(nodes, connections, catalog).feedback)
+    feedback = len(plan.feedback)
     messages = [
-        f"Generated C++ project in {output_dir}",
+        f"Generated C++ project in {output_dir}"
+        + (f" ({changed} file{'s' if changed != 1 else ''} changed)" if changed else " (nothing changed)"),
         f"{len(nodes)} nodes, {len(connections)} wires"
         + (f" ({feedback} feedback)" if feedback else "")
         + (", with app widgets" if gui else ", no window (no visible app widgets)"),
@@ -366,87 +376,225 @@ def generate_project(
     return GenerateResult(True, messages, gui)
 
 
-def _main_cpp(nodes, connections, catalog, cpp_type, settings, name, gui) -> str:
-    plan = plan_wires(nodes, connections, catalog)
-    used_types = sorted({n["type"] for n in nodes})
-    connected_inputs = {(c["target_node"], c["target_socket"]) for c in connections}
-    held_inputs = {(connections[i]["target_node"], connections[i]["target_socket"])
-                   for i in range(len(connections)) if plan.starts_with_value(i)}
+def cmake_target_name(name: str) -> str:
+    """The executable's name (without .exe): the project name made safe for CMake."""
+    return "".join(c if c.isalnum() or c in "_-" else "_" for c in name) or "app"
+
+
+def values_file_name(name: str) -> str:
+    """The values file the program reads at start-up, next to the executable."""
+    return cmake_target_name(name) + ".values.json"
+
+
+def _type_function(type_id: str) -> str:
+    return "vl_type_" + "".join(c if c.isalnum() else "_" for c in type_id)
+
+
+def _type_file(type_id: str) -> str:
+    return "node_" + "".join(c if c.isalnum() or c in "_-" else "_" for c in type_id) + ".cpp"
+
+
+def _write_tree(output_dir: Path, files: dict[str, bytes]) -> int:
+    """Write files (relative path -> content) into output_dir, skipping files
+    that already have that content, so their modification time stays and the
+    build skips them. Files listed in the marker by an earlier compile and not
+    written now are removed. Returns how many files were written or removed."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    marker = output_dir / MARKER_FILE
+    previous: list[str] = []
+    try:
+        previous = json.loads(marker.read_text(encoding="utf-8")).get("files", [])
+    except (OSError, ValueError, AttributeError):
+        # First compile, or a folder from an older VL that wiped these on
+        # every compile: start them over.
+        for sub in ("runtime", "nodes", "generated", "cmake"):
+            shutil.rmtree(output_dir / sub, ignore_errors=True)
+
+    changed = 0
+    for rel, content in files.items():
+        path = output_dir / rel
+        try:
+            if path.read_bytes() == content:
+                continue
+        except OSError:
+            pass
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".vl-tmp")
+        tmp.write_bytes(content)
+        os.replace(tmp, path)
+        changed += 1
+
+    for rel in previous:
+        if rel not in files and not rel.startswith(("/", "..")):
+            path = output_dir / rel
+            if path.is_file():
+                path.unlink()
+                changed += 1
+                # Remove folders that became empty.
+                parent = path.parent
+                while parent != output_dir and parent.is_dir() and not any(parent.iterdir()):
+                    parent.rmdir()
+                    parent = parent.parent
+
+    manifest = json.dumps({
+        "note": "Written by VL. The files listed here are rewritten on every compile.",
+        "files": sorted(files),
+    }, indent=1) + "\n"
+    try:
+        same = marker.read_text(encoding="utf-8") == manifest
+    except OSError:
+        same = False
+    if not same:
+        marker.write_text(manifest, encoding="utf-8")
+    return changed
+
+
+def _node_type_cpp(type_id: str, catalog, type_owner: dict[str, str]) -> str:
+    """generated/node_<type>.cpp: the vl::NodeType describing one node type."""
+    node_def = catalog[type_id]
+    cls = node_def.cpp_class
+    includes = []
+    # Custom types this node uses but another node defines.
+    for s in node_def.inputs + node_def.outputs + node_def.settings:
+        owner = type_owner.get(s.type)
+        if owner and owner != type_id:
+            include = f"nodes/{owner}/{catalog[owner].types[s.type].header}"
+            if include not in includes:
+                includes.append(include)
+    includes += [f"nodes/{type_id}/{rel}" for rel in node_def.code
+                 if rel.endswith((".hpp", ".h", ".hh", ".hxx"))]
 
     out = [
-        "// Generated by VL. Do not edit: this file is rewritten on every compile.",
+        f"// Generated by VL: the node type {_cpp_string(type_id)} for the runtime.",
+        "// Do not edit: this file is rewritten on every compile.",
         '#include "vl/runtime.hpp"',
+        *[f'#include "{inc}"' for inc in includes],
+        "",
+        f"const vl::NodeType& {_type_function(type_id)}() {{",
+        f"    using N = {cls};",
+        "    static const vl::NodeType type = [] {",
+        "        vl::NodeType t;",
+        f"        t.id = {_cpp_string(type_id)};",
+        f"        t.title = {_cpp_string(node_def.title)};",
+        "        t.create = [] { return std::unique_ptr<vl::Node>(new N()); };",
+    ]
+    for s in node_def.inputs:
+        out.append(f"        t.inputs.push_back(vl::inputPort({_cpp_string(s.id)}, {_cpp_string(s.type)}, "
+                   f"{'true' if s.optional else 'false'}, &N::{s.id}));")
+    for s in node_def.outputs:
+        out.append(f"        t.outputs.push_back(vl::outputPort({_cpp_string(s.id)}, {_cpp_string(s.type)}, "
+                   f"&N::{s.id}));")
+    for s in node_def.settings:
+        out.append(f"        t.settings.push_back(vl::settingPort({_cpp_string(s.id)}, &N::{s.id}));")
+    if node_def.app_widget is not None:
+        out.append("        t.hasWidget = true;")
+    out += [
+        "        return t;",
+        "    }();",
+        "    return type;",
+        "}",
         "",
     ]
-    for type_id in used_types:
-        for rel in catalog[type_id].code:
-            if rel.endswith((".hpp", ".h", ".hh", ".hxx")):
-                out.append(f'#include "nodes/{type_id}/{rel}"')
-    out += [
+    return "\n".join(out)
+
+
+def _main_cpp(nodes, connections, plan: WirePlan, gui: bool) -> str:
+    """generated/main.cpp: creates the nodes and wires them. Only depends on
+    which nodes there are and how they are wired, not on any value."""
+    used_types = sorted({n["type"] for n in nodes})
+    out = [
+        "// Generated by VL. Do not edit: this file is rewritten on every compile.",
+        "// Values (settings, input fields) are in the .values.json file next to the program.",
+        '#include "vl/runtime.hpp"',
         "",
-        "int main() {",
-        f"    vl::App app({_cpp_string(name)}, {'true' if settings['fullscreen'] else 'false'}, "
-        f"{'true' if gui else 'false'});",
+        *[f"const vl::NodeType& {_type_function(t)}();" for t in used_types],
+        "",
+        "int main(int argc, char** argv) {",
+        f"    vl::App app({'true' if gui else 'false'});",
         "",
         "    // Nodes",
     ]
+    # Variables are numbered: ids like "a-1" and "a_1" would clash as identifiers.
+    var = {n["id"]: f"n{i}" for i, n in enumerate(nodes)}
+    for n in nodes:
+        out.append(f"    auto& {var[n['id']]} = app.create({_type_function(n['type'])}(), "
+                   f"{_cpp_string(n['id'])});")
+    out += ["", "    // Wires (feedback wires and wires into non-triggering inputs don't trigger a run)"]
+    for i, c in enumerate(connections):
+        out.append(f"    app.connect({var[c['source_node']]}, {_cpp_string(c['source_socket'])}, "
+                   f"{var[c['target_node']]}, {_cpp_string(c['target_socket'])}, "
+                   f"{'true' if plan.triggers(i) else 'false'});")
+    out += [
+        "",
+        "    if (!app.loadValues(argc, argv))",
+        "        return 1;",
+        "    return app.run();",
+        "}",
+        "",
+    ]
+    return "\n".join(out)
 
+
+def _json_value(value: Any, data_type: str) -> Any:
+    """A value as the runtime reads it (numbers rounded for integer types)."""
+    if isinstance(value, bool) or data_type == "bool":
+        return bool(value)
+    if isinstance(value, (int, float)):
+        return int(round(value)) if is_integer_type(data_type) else float(value)
+    return value
+
+
+def _values(nodes, connections, plan: WirePlan, catalog, settings, name) -> dict[str, Any]:
+    """The values file: everything about the graph that can change without
+    compiling (settings, starting values of inputs, widget options)."""
+    connected_inputs = {(c["target_node"], c["target_socket"]) for c in connections}
+    held_inputs = {(connections[i]["target_node"], connections[i]["target_socket"])
+                   for i in range(len(connections)) if plan.starts_with_value(i)}
+    result: dict[str, Any] = {
+        "app": {"name": name, "fullscreen": bool(settings.get("fullscreen", True))},
+        "nodes": {},
+    }
     for n in nodes:
         node_def = catalog[n["type"]]
-        var = _cpp_identifier(n["id"])
         values = n.get("values", {})
-        out.append(f"    auto& {var} = app.add<{node_def.cpp_class}>({_cpp_string(n['id'])}, "
-                   f"{_cpp_string(node_def.title)});")
+        entry: dict[str, Any] = {}
 
-        for s in node_def.settings:
-            if s.id in values:
-                out.append(f"    {var}.{s.id} = {_cpp_literal(values[s.id], s.type, cpp_type(s.type))};")
+        node_settings = {s.id: _json_value(values[s.id], s.type) for s in node_def.settings if s.id in values}
+        if node_settings:
+            entry["settings"] = node_settings
 
+        inputs: dict[str, Any] = {}
         for s in node_def.inputs:
             key = (n["id"], s.id)
-            literal = lambda v: _cpp_literal(v, s.type, cpp_type(s.type))  # noqa: E731
-            if not s.optional:
-                out.append(f"    app.watch({var}, {var}.{s.id});")
+            field = values.get(s.id, s.widget.default) if s.widget is not None else None
             if key not in connected_inputs:
                 # Unconnected input: its field value, or an optional input's default.
                 if s.widget is not None:
-                    value = literal(values.get(s.id, s.widget.default))
-                    out.append(f"    {var}.{s.id}.{'init' if s.optional else 'receive'}({value});")
+                    inputs[s.id] = {"init" if s.optional else "receive": _json_value(field, s.type)}
                 elif s.optional and s.default is not None:
-                    out.append(f"    {var}.{s.id}.init({literal(s.default)});")
+                    inputs[s.id] = {"init": _json_value(s.default, s.type)}
             else:
-                start = (values.get(s.id, s.widget.default) if s.widget is not None
-                         else s.default if s.default is not None
-                         else s.widget.default if s.widget is not None else None)
+                start = field if s.widget is not None else s.default
                 if s.optional:
                     if start is not None:
-                        out.append(f"    {var}.{s.id}.init({literal(start)});  // optional: until a value arrives")
+                        inputs[s.id] = {"init": _json_value(start, s.type)}  # until a value arrives
                 elif key in held_inputs:
                     # Fed by a wire in a loop that doesn't trigger: start from the
-                    # field value (or the type's default), so the loop can start.
-                    initial = literal(start) if start is not None else f"{cpp_type(s.type)}{{}}"
-                    out.append(f"    {var}.{s.id}.receive({initial});  // in a loop: initial value")
+                    # field value (or T{}), so the loop can start.
+                    inputs[s.id] = {"receive": _json_value(start, s.type) if start is not None else None}
+        if inputs:
+            entry["inputs"] = inputs
 
         if node_def.app_widget is not None:
             title_setting = node_def.app_widget.title_setting
             title = str(values.get(title_setting, "")) if title_setting else ""
-            visible = n.get("widget_visible", True)
-            out.append(f"    app.setWidget({var}, {'true' if visible else 'false'}, "
-                       f"{_cpp_string(title or node_def.title)});")
-        out.append("")
-
-    out.append("    // Wires (feedback wires and wires into non-triggering inputs don't trigger a run)")
-    for i, c in enumerate(connections):
-        src, tgt = _cpp_identifier(c["source_node"]), _cpp_identifier(c["target_node"])
-        triggers = "true" if plan.triggers(i) else "false"
-        out.append(f"    {src}.{c['source_socket']}.connect({tgt}.{c['target_socket']}, {tgt}, {triggers});")
-
-    out += ["", "    return app.run();", "}", ""]
-    return "\n".join(out)
+            entry["widget"] = {"visible": bool(n.get("widget_visible", True)), "title": title or node_def.title}
+        if entry:
+            result["nodes"][n["id"]] = entry
+    return result
 
 
-def _cmake_lists(name: str, cpp_files: list[str], gui: bool) -> str:
-    target = "".join(c if c.isalnum() or c in "_-" else "_" for c in name) or "app"
+def _cmake_lists(target: str, cpp_files: list[str], gui: bool) -> str:
     sources = "\n    ".join(["generated/main.cpp", "runtime/vl/app.cpp", *cpp_files])
     return f"""# Generated by VL. Do not edit: this file is rewritten on every compile.
 cmake_minimum_required(VERSION 3.16)
@@ -461,6 +609,14 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${{CMAKE_SOURCE_DIR}})
 
 option(VL_GUI "Build the app widget window (Dear ImGui + SDL2)" {"ON" if gui else "OFF"})
+
+# ccache, when installed, makes rebuilds of unchanged files almost free.
+if(NOT VL_ZIG AND NOT CMAKE_CXX_COMPILER_LAUNCHER)
+    find_program(VL_CCACHE ccache)
+    if(VL_CCACHE)
+        set(CMAKE_CXX_COMPILER_LAUNCHER ${{VL_CCACHE}})
+    endif()
+endif()
 
 add_executable({target}
     {sources}

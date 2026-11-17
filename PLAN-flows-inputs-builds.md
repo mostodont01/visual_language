@@ -146,4 +146,26 @@ exactly as before (RoboCars bench unchanged).
 (Fill in as you go: anything that changes the node JSON, the C++ node API, `generate_project`, or the
 `.vl` file layout.)
 
-- 
+- **Step 0 (`9cb15bc`):** `.vl` file version 3 adds `history/history.json` + `history/objects/*`
+  (commits, branches). `project.json` is unchanged; `tools/bench.py` already reads both.
+- **Step 1 (`0e97f3a`), new and optional:** input keys `"optional": true`, `"default": value`,
+  `"triggers": false`; C++ `input.connected()`, `input.init(v)`. `hasValue()` stays false for an
+  optional input until a real value arrives. Detect Obstacles can drop its "skip repeated data" code:
+  make the position input `"triggers": false`. A non-triggering wire inside a loop is never picked as
+  the DFS feedback wire and starts with a value, so it is a way to choose the loop's feedback wire.
+- **Step 2 (incremental builds):**
+  - `generate_project(...)` has the same signature. It now also writes `<name>.values.json` next to
+    the executable (settings and input field values); **the program needs it at start-up** (it exits
+    with an error if it's missing). `VL_VALUES=<file>` runs the same program with another values file.
+    `pi_bench.py` rsyncs the whole build folder, so it gets the file automatically.
+  - The output folder is no longer wiped: unchanged files keep their mtime, files from earlier
+    compiles that aren't needed are removed (list in `.vl-build`, now JSON). The bench's
+    `bench/build/project/build` therefore only recompiles what changed between scenes (nothing,
+    when only values differ).
+  - **Each node type is compiled in its own translation unit** (`generated/node_<type>.cpp`),
+    including only that node's headers (plus the headers of custom types it uses). A node header must
+    include everything it uses itself; it can no longer rely on another node's header having been
+    included first in `main.cpp`. Shared helper headers are no longer included twice into one file,
+    so the named `#ifndef ROBOCARS_X_HPP` guards aren't needed any more (they don't hurt).
+  - Settings are assigned from the values file: a setting's C++ member must be a number, `bool`,
+    `std::string`, or a type constructible from `std::string`.

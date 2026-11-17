@@ -14,6 +14,8 @@ sys.path.insert(0, str(ROOT))
 # Headless Qt, and a private config folder so tests never touch the user's
 # recent-projects list (QSettings).
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+# Tools installed next to Python (pip's cmake / ninja in .venv/bin) count too.
+os.environ["PATH"] = str(Path(sys.executable).parent) + os.pathsep + os.environ.get("PATH", "")
 os.environ["XDG_CONFIG_HOME"] = tempfile.mkdtemp(prefix="vl-test-config-")
 
 from node_catalog import load_node_definitions  # noqa: E402

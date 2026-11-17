@@ -78,7 +78,16 @@ Package → Run workflow* (the files are then under *Artifacts*). Locally:
 ## Compiling graphs
 
 **Compile** (Ctrl+B) turns the graph into a C++ project (CMake) in the output
-folder and builds it into a program for the chosen target:
+folder and builds it into a program for the chosen target. Next to the
+program VL writes `<program>.values.json` with every setting and input value;
+the program reads it at start-up, so **copy both** to the robot.
+
+Builds are incremental: the output folder is kept, only changed files are
+rewritten and each node type is compiled on its own. Changing a value
+compiles nothing, changing one node's code recompiles that node, adding a
+wire recompiles one small file. `VL_VALUES=other.values.json ./program` runs
+the program with other values. [ccache](https://ccache.dev) is used when
+installed.
 
 | Target | Runs on |
 | --- | --- |
